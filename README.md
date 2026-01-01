@@ -1,5 +1,9 @@
 ### lotspeed merge_bl (beta)
 
+
+* 前置条件 `kernel 6.18.2 or later`
+
+
 <div align=center>
     <img src="https://github.com/uk0/lotspeed/blob/merge_bl/logo.png" width="400" height="400" />
 </div>
@@ -84,11 +88,10 @@ ss -ti
 ```
 
 
-* helper （lotserver_beta越小强的越凶，建议大雨620否则会导致CPU飙高）
 
-这是一个混合拥塞控制算法，整合了 BBR v3 + FAST TCP + Hybla 三种算法的优点。
+> 这是一个混合拥塞控制算法，整合了 BBR v3 + FAST TCP + Hybla 三种算法的优点。
 
-  ---
+---
 核心架构
 
 | 模块       | 来源     | 功能                                   |
@@ -216,6 +219,12 @@ PAC (Proactive ACK Control) for TCP Incast Congestion
 
 * https://github.com/uk0/TCP-Incast/tree/zeta-tcp 
 
+
+
+### Qdisc `neoq`
+
+
+[QDISC_DOC](QDISC_DOC.md)
 
 
 -----------------------------------

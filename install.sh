@@ -1,11 +1,12 @@
 #!/bin/bash
 #
-# LotSpeed v2.0 - BBR v3 + FAST TCP + Hybla Hybrid Edition
+# LotSpeed v2.0 + NeoQ v3.0 - Complete Network Optimization Suite
 # Author: uk0 @ 2025
 # GitHub: https://github.com/uk0/lotspeed
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
+#   Or run locally: sudo bash install.sh
 #
 
 set -e
@@ -14,7 +15,6 @@ set -e
 GITHUB_REPO="uk0/lotspeed"
 GITHUB_BRANCH="merge_bl"
 INSTALL_DIR="/opt/lotspeed"
-MODULE_NAME="lotspeed"
 VERSION="2.0"
 CONFIG_FILE="/etc/lotspeed.conf"
 SYSCTL_FILE="/etc/sysctl.d/99-lotspeed.conf"
@@ -29,22 +29,16 @@ BLUE='\033[0;34m'
 MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 WHITE='\033[1;37m'
-NC='\033[0m' # No Color
+BOLD='\033[1m'
+NC='\033[0m'
 
 # ================= UI 核心算法 =================
 BOX_WIDTH=70
 
 get_width() {
     local str="$1"
-    local clean_str=$(echo -e "$str" | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
-    local width=0
-    local len=${#clean_str}
-    for ((i=0; i<len; i++)); do
-        local char="${clean_str:$i:1}"
-        local ord=$(printf "%d" "'$char" 2>/dev/null || echo 128)
-        if [ "$ord" -gt 127 ]; then ((width+=2)); else ((width+=1)); fi
-    done
-    echo $width
+    local clean_str=$(echo -e "$str" | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g" 2>/dev/null || echo "$str")
+    echo ${#clean_str}
 }
 
 repeat_char() {
@@ -123,29 +117,29 @@ log_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 
 print_banner() {
     echo -e "${CYAN}"
-    cat << "EOF"
+    cat << 'BANNER'
 ╔══════════════════════════════════════════════════════════════════════╗
 ║                                                                      ║
 ║      _          _   ____                      _                      ║
 ║     | |    ___ | |_/ ___| _ __   ___  ___  __| |                     ║
 ║     | |   / _ \| __\___ \| '_ \ / _ \/ _ \/ _` |                     ║
 ║     | |__| (_) | |_ ___) | |_) |  __/  __/ (_| |                     ║
-║     |_____\___/ \__|____/| .__/ \___|\___|\__,_|                     ║
+║     |_____\___/ \__|____/| .__/ \___|\___|\___|                      ║
 ║                          |_|                                         ║
 ║                                                                      ║
-║            BBR v3 + FAST TCP + Hybla Hybrid Edition                  ║
-║                       Version 2.0                                    ║
+║        LotSpeed v2.0 + NeoQ v3.0 Network Optimization Suite          ║
+║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
-EOF
+BANNER
     echo -e "${NC}"
 }
 
-# ================= 安装逻辑函数 =================
+# ================= 系统检查函数 =================
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root"
-        echo -e "${YELLOW}Try: curl -fsSL <url> | sudo bash${NC}"
+        echo -e "${YELLOW}Try: sudo bash $0${NC}"
         exit 1
     fi
 }
@@ -172,18 +166,12 @@ check_system() {
     KERNEL_MAJOR=$(echo $KERNEL_VERSION | cut -d. -f1)
     KERNEL_MINOR=$(echo $KERNEL_VERSION | cut -d. -f2)
 
-    # v2.0 需要 kernel 6.x+
-    if [[ $KERNEL_MAJOR -lt 6 ]]; then
-        log_error "Kernel version must be >= 6.0 (current: $(uname -r))"
-        log_info "LotSpeed v2.0 requires Linux Kernel 6.x+ for sysctl interface"
+    if [[ $KERNEL_MAJOR -lt 5 ]]; then
+        log_error "Kernel version must be >= 5.0 (current: $(uname -r))"
         exit 1
     fi
 
     ARCH=$(uname -m)
-    if [[ "$ARCH" != "x86_64" ]] && [[ "$ARCH" != "aarch64" ]]; then
-        log_warn "Architecture $ARCH may not be fully tested"
-    fi
-
     log_success "System: $OS $OS_VERSION (kernel $(uname -r), $ARCH)"
 }
 
@@ -191,69 +179,74 @@ install_dependencies() {
     log_info "Installing dependencies..."
 
     if [[ "$OS" == "centos" ]]; then
-        yum install -y gcc make kernel-devel-$(uname -r) kernel-headers-$(uname -r) wget curl bc 2>/dev/null || {
-            log_warn "Some packages may be missing, trying alternative..."
-            yum install -y gcc make kernel-devel kernel-headers wget curl bc
+        yum install -y gcc make kernel-devel-$(uname -r) kernel-headers-$(uname -r) wget curl bc iproute-tc 2>/dev/null || {
+            yum install -y gcc make kernel-devel kernel-headers wget curl bc iproute-tc
         }
     elif [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
         apt-get update >/dev/null 2>&1
-        apt-get install -y gcc make linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
-            log_warn "Some packages may be missing, trying alternative..."
-            apt-get install -y gcc make linux-headers-generic wget curl bc
+        apt-get install -y gcc make linux-headers-$(uname -r) wget curl bc iproute2 2>/dev/null || {
+            apt-get install -y gcc make linux-headers-generic wget curl bc iproute2
         }
     fi
 
     log_success "Dependencies installed"
 }
 
+# ================= 下载源码 =================
+
 download_source() {
-    log_info "Downloading LotSpeed v$VERSION source code..."
+    log_info "Downloading source code..."
 
     mkdir -p $INSTALL_DIR
     cd $INSTALL_DIR
 
-    # 下载 v2.0 源代码
+    # 下载 LotSpeed 源码
     curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c || {
         log_error "Failed to download lotspeed.c"
         exit 1
     }
 
+    # 下载 NeoQ 源码
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/qdisc_newneo.c" -o qdisc_newneo.c || {
+        log_error "Failed to download qdisc_newneo.c"
+        exit 1
+    }
+
     # 创建 Makefile
-    cat > Makefile << 'EOF'
+    cat > Makefile << 'MAKEFILE'
+KERNEL_RELEASE  ?= $(shell uname -r)
+KERNEL_DIR      ?= /lib/modules/$(KERNEL_RELEASE)/build
+
 obj-m += lotspeed.o
+obj-m += sch_neoq.o
+sch_neoq-objs := qdisc_newneo.o
 
-KERNELDIR ?= /lib/modules/$(shell uname -r)/build
-PWD := $(shell pwd)
+ccflags-y := -std=gnu99 -DCONFIG_NET_SCH_DEFAULT
 
-ccflags-y := -std=gnu99 -Wno-declaration-after-statement
+.PHONY: all clean install
 
 all:
-	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) modules
 
 clean:
-	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
+	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) clean
 
 install: all
-	insmod lotspeed.ko
-	@echo "lotspeed" >> /etc/modules-load.d/lotspeed.conf 2>/dev/null || true
-	@cp lotspeed.ko /lib/modules/$(shell uname -r)/kernel/net/ipv4/ 2>/dev/null || true
-	@depmod -a
-
-uninstall:
-	-rmmod lotspeed 2>/dev/null
-	@rm -f /etc/modules-load.d/lotspeed.conf
-	@rm -f /lib/modules/$(shell uname -r)/kernel/net/ipv4/lotspeed.ko
-	@depmod -a
-EOF
+	cp lotspeed.ko /lib/modules/$(KERNEL_RELEASE)/kernel/net/ipv4/ 2>/dev/null || true
+	cp sch_neoq.ko /lib/modules/$(KERNEL_RELEASE)/kernel/net/sched/ 2>/dev/null || true
+	depmod -a
+MAKEFILE
 
     log_success "Source code downloaded"
 }
 
-compile_module() {
-    log_info "Compiling LotSpeed v$VERSION kernel module..."
+# ================= 编译模块 =================
+
+compile_modules() {
+    log_info "Compiling kernel modules..."
 
     cd $INSTALL_DIR
-    make clean >/dev/null 2>&1
+    make clean >/dev/null 2>&1 || true
 
     if ! make 2>&1; then
         log_error "Compilation failed"
@@ -261,159 +254,130 @@ compile_module() {
     fi
 
     if [[ ! -f lotspeed.ko ]]; then
-        log_error "Module compilation failed - lotspeed.ko not found"
+        log_error "lotspeed.ko not found"
         exit 1
     fi
 
-    log_success "Module compiled successfully"
+    if [[ ! -f sch_neoq.ko ]]; then
+        log_error "sch_neoq.ko not found"
+        exit 1
+    fi
+
+    log_success "Modules compiled successfully"
 }
 
-load_module() {
-    log_info "Loading LotSpeed v$VERSION module..."
+# ================= 安装模块 =================
 
-    rmmod lotspeed 2>/dev/null || true
+install_modules() {
+    log_info "Installing kernel modules..."
 
-    insmod $INSTALL_DIR/lotspeed.ko || {
-        log_error "Failed to load module"
-        dmesg | tail -10
-        exit 1
-    }
+    cd $INSTALL_DIR
 
-    # 等待 sysctl 接口就绪
-    sleep 1
-
-    # 检查 sysctl 接口
-    if [[ ! -d /proc/sys/net/ipv4/lotspeed ]]; then
-        log_error "sysctl interface not available at /proc/sys/net/ipv4/lotspeed"
-        exit 1
-    fi
-
-    sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null 2>&1
-
-    # 持久化设置
-    if ! grep -q "net.ipv4.tcp_congestion_control=lotspeed" /etc/sysctl.conf; then
-        echo "net.ipv4.tcp_congestion_control=lotspeed" >> /etc/sysctl.conf
-    fi
-
-    echo "lotspeed" > /etc/modules-load.d/lotspeed.conf
-    cp $INSTALL_DIR/lotspeed.ko /lib/modules/$(uname -r)/kernel/net/ipv4/ 2>/dev/null || true
+    # 复制到系统目录
+    mkdir -p /lib/modules/$(uname -r)/kernel/net/ipv4/
+    mkdir -p /lib/modules/$(uname -r)/kernel/net/sched/
+    cp lotspeed.ko /lib/modules/$(uname -r)/kernel/net/ipv4/
+    cp sch_neoq.ko /lib/modules/$(uname -r)/kernel/net/sched/
     depmod -a
 
-    log_success "Module loaded and set as default"
+    log_success "Modules installed"
 }
 
-# ================= 创建默认配置文件 =================
-create_default_config() {
-    log_info "Creating default configuration..."
+# ================= 获取默认拥塞控制算法 =================
 
-    cat > $CONFIG_FILE << 'EOF'
-# LotSpeed v2.0 Configuration File
-# BBR v3 + FAST TCP + Hybla Hybrid Edition
-#
-# This file is loaded at boot and when running 'lotspeed load'
-# Edit with: lotspeed edit
-# Save current: lotspeed save
-# Load config: lotspeed load
-#
+get_default_cc() {
+    local available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
+    if echo "$available" | grep -q "cubic"; then echo "cubic"
+    elif echo "$available" | grep -q "reno"; then echo "reno"
+    elif echo "$available" | grep -q "bbr"; then echo "bbr"
+    else echo "cubic"
+    fi
+}
 
-# ============== 基础参数 ==============
-min_cwnd = 4
-max_cwnd = 15000
-beta = 717
+# ================= 安全卸载模块 =================
 
-# ============== FAST TCP 延迟控制 ==============
-fast_alpha = 20
-fast_gamma = 50
+safe_unload_module() {
+    local module="$1"
+    local algo_name="$2"
 
-# ============== 高延迟优化 (Hybla) ==============
-hd_enable = 1
-hd_thresh_us = 150000
-hd_ref_us = 50000
-hd_boost = 25
-hd_rho_max = 400
-hd_cwnd_gain = 150
-hd_pacing_gain = 130
-hd_min_cwnd = 10
-hd_startup_boost = 50
+    print_box_top "${YELLOW}"
+    print_box_row "Safe Unload: $module" "center" "${YELLOW}"
+    print_box_div "${YELLOW}"
 
-# ============== 勇敢模式 (抗抖动) ==============
-brave_enable = 1
-brave_rtt_pct = 25
-brave_hold_ms = 300
-brave_floor_pct = 85
+    # 1. 切换到默认算法
+    local default_cc=$(get_default_cc)
+    print_box_row "Switching to $default_cc..." "left" "${YELLOW}"
+    sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
 
-# ============== 历史缓存 ==============
-hist_enable = 1
-hist_ttl_sec = 1200
-hist_max_entries = 8192
+    # 2. 等待连接迁移
+    sleep 2
 
-# ============== ECN 支持 ==============
-ecn_enable = 1
-ecn_factor = 85
-ecn_alpha_gain = 16
-ecn_alpha_init = 256
-ecn_thresh = 50
-ecn_max_rtt_us = 5000
-full_ecn_cnt = 2
-ecn_reprobe_gain = 50
+    # 3. 查找并关闭使用该算法的连接（排除SSH 22端口）
+    if [[ -n "$algo_name" ]]; then
+        print_box_row "Closing connections using $algo_name..." "left" "${YELLOW}"
 
-# ============== 启动优化 ==============
-turbo_startup = 1
-startup_gain = 300
-startup_min_rounds = 3
+        # 获取使用该算法的连接（排除22端口）
+        local conns=$(ss -tnp 2>/dev/null | grep "$algo_name" | grep -v ":22 " | grep -v ":22$" || true)
+        local count=0
 
-# ============== ACK 聚合 ==============
-ack_agg_enable = 1
-extra_acked_max_us = 100000
+        if [[ -n "$conns" ]]; then
+            echo "$conns" | while read line; do
+                # 提取本地地址和端口
+                local local_addr=$(echo "$line" | awk '{print $4}')
+                local remote_addr=$(echo "$line" | awk '{print $5}')
 
-# ============== 恢复优化 ==============
-fast_recovery = 1
-recovery_boost = 20
+                # 使用ss -K关闭连接 (需要较新内核)
+                ss -K dst $remote_addr 2>/dev/null || true
+                ((count++)) || true
+            done
+            print_kv_row "Connections closed" "$count" "${YELLOW}"
+        else
+            print_box_row "No active connections to close" "left" "${YELLOW}"
+        fi
+    fi
 
-# ============== Pacing ==============
-pacing_margin = 2
-burst_mode = 0
+    # 4. 等待一会让连接关闭
+    sleep 1
 
-# ============== PROBE_RTT ==============
-probe_rtt_cwnd_pct = 50
-probe_rtt_duration = 150
+    # 5. 尝试卸载模块
+    print_box_row "Unloading module..." "left" "${YELLOW}"
 
-# ============== TSO ==============
-tso_rtt_shift = 9
+    local retry=0
+    while lsmod | grep -q "^${module} " && [ $retry -lt 5 ]; do
+        rmmod $module 2>/dev/null && break
+        ((retry++))
+        print_box_row "Retry $retry/5..." "left" "${YELLOW}"
+        sleep 2
+    done
 
-# ============== 快速路径 ==============
-fast_path = 1
+    # 6. 强制卸载
+    if lsmod | grep -q "^${module} "; then
+        print_box_row "Force unloading..." "left" "${YELLOW}"
+        rmmod -f $module 2>/dev/null || {
+            print_box_row "${RED}Failed to unload (reboot required)${NC}" "left" "${YELLOW}"
+            print_box_bottom "${YELLOW}"
+            return 1
+        }
+    fi
 
-# ============== 丢包检测 ==============
-loss_thresh = 2
-full_loss_cnt = 6
-inflight_headroom = 15
-
-# ============== 带宽探测 ==============
-bw_probe_max_rounds = 63
-bw_probe_base_us = 2000000
-bw_probe_rand_us = 1000000
-bw_probe_cwnd_gain = 1
-EOF
-
-    chmod 644 $CONFIG_FILE
-    log_success "Default config created at $CONFIG_FILE"
+    print_box_row "${GREEN}Module unloaded successfully${NC}" "center" "${YELLOW}"
+    print_box_bottom "${YELLOW}"
+    return 0
 }
 
 # ================= 创建管理脚本 =================
+
 create_management_script() {
     log_info "Creating management script..."
 
     cat > /usr/local/bin/lotspeed << 'SCRIPT_EOF'
 #!/bin/bash
-# LotSpeed v2.0 Management Script
-# sysctl-based parameter management
+#
+# LotSpeed + NeoQ Management Script
+#
 
-ACTION=$1
 INSTALL_DIR="/opt/lotspeed"
-VERSION="2.0"
 CONFIG_FILE="/etc/lotspeed.conf"
-SYSCTL_FILE="/etc/sysctl.d/99-lotspeed.conf"
 SYSCTL_PATH="/proc/sys/net/ipv4/lotspeed"
 
 # 颜色
@@ -426,20 +390,12 @@ WHITE='\033[1;37m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# ================= UI 算法 =================
 BOX_WIDTH=70
 
 get_width() {
     local str="$1"
-    local clean_str=$(echo -e "$str" | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
-    local width=0
-    local len=${#clean_str}
-    for ((i=0; i<len; i++)); do
-        local char="${clean_str:$i:1}"
-        local ord=$(printf "%d" "'$char" 2>/dev/null || echo 128)
-        if [ "$ord" -gt 127 ]; then ((width+=2)); else ((width+=1)); fi
-    done
-    echo $width
+    local clean_str=$(echo -e "$str" | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g" 2>/dev/null || echo "$str")
+    echo ${#clean_str}
 }
 
 repeat_char() {
@@ -471,11 +427,9 @@ print_box_row() {
     local content="$1"
     local align="${2:-left}"
     local color="${3:-$CYAN}"
-
     local content_width=$(get_width "$content")
     local total_padding=$((BOX_WIDTH - 2 - content_width))
     [ $total_padding -lt 0 ] && total_padding=0
-
     echo -ne "${color}║${NC}"
     if [ "$align" == "center" ]; then
         local left_pad=$((total_padding / 2))
@@ -494,514 +448,352 @@ print_kv_row() {
     local key="$1"
     local val="$2"
     local color="${3:-$CYAN}"
-
     local key_width=$(get_width "$key")
     local val_width=$(get_width "$val")
     local available=$((BOX_WIDTH - 4))
     local padding=$((available - key_width - val_width))
     [ $padding -lt 1 ] && padding=1
-
     echo -ne "${color}║${NC} $key"
     repeat_char " " $padding
     echo -e "$val ${color}║${NC}"
 }
 
-# ================= 参数操作 =================
-
-# 读取 sysctl 参数
-get_param() {
-    local param="$1"
-    if [[ -f "$SYSCTL_PATH/$param" ]]; then
-        cat "$SYSCTL_PATH/$param" 2>/dev/null
-    else
-        echo "N/A"
+get_default_cc() {
+    local available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
+    if echo "$available" | grep -q "cubic"; then echo "cubic"
+    elif echo "$available" | grep -q "reno"; then echo "reno"
+    elif echo "$available" | grep -q "bbr"; then echo "bbr"
+    else echo "cubic"
     fi
 }
 
-# 设置 sysctl 参数
-set_param() {
-    local param="$1"
-    local value="$2"
-    if [[ -f "$SYSCTL_PATH/$param" ]]; then
-        echo "$value" > "$SYSCTL_PATH/$param" 2>/dev/null
-        return $?
-    else
-        return 1
+# 安全卸载模块
+safe_unload() {
+    local module="$1"
+    local algo_name="$2"
+
+    # 切换算法
+    local default_cc=$(get_default_cc)
+    echo -e "${YELLOW}Switching to $default_cc...${NC}"
+    sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+    sleep 2
+
+    # 关闭连接（排除22端口）
+    if [[ -n "$algo_name" ]]; then
+        echo -e "${YELLOW}Closing $algo_name connections (except SSH)...${NC}"
+        ss -tnp 2>/dev/null | grep "$algo_name" | grep -v ":22 " | grep -v ":22$" | while read line; do
+            local remote=$(echo "$line" | awk '{print $5}')
+            ss -K dst $remote 2>/dev/null || true
+        done
     fi
-}
+    sleep 1
 
-# 保存当前配置到文件
-save_config() {
-    print_box_top "${GREEN}"
-    print_box_row "Saving Configuration" "center" "${GREEN}"
-    print_box_div "${GREEN}"
-
-    # 创建配置文件
-    echo "# LotSpeed v$VERSION Configuration" > $CONFIG_FILE
-    echo "# Saved at $(date '+%Y-%m-%d %H:%M:%S')" >> $CONFIG_FILE
-    echo "" >> $CONFIG_FILE
-
-    # 同时创建 sysctl.d 配置用于开机自动加载
-    echo "# LotSpeed v$VERSION sysctl configuration" > $SYSCTL_FILE
-    echo "# Auto-generated at $(date '+%Y-%m-%d %H:%M:%S')" >> $SYSCTL_FILE
-    echo "" >> $SYSCTL_FILE
-
-    local count=0
-    for param_file in $SYSCTL_PATH/*; do
-        if [[ -f "$param_file" ]]; then
-            param=$(basename "$param_file")
-            value=$(cat "$param_file" 2>/dev/null)
-            echo "$param = $value" >> $CONFIG_FILE
-            echo "net.ipv4.lotspeed.$param = $value" >> $SYSCTL_FILE
-            ((count++))
-        fi
+    # 卸载模块
+    echo -e "${YELLOW}Unloading $module...${NC}"
+    local retry=0
+    while lsmod | grep -q "^${module} " && [ $retry -lt 5 ]; do
+        rmmod $module 2>/dev/null && break
+        ((retry++))
+        echo -e "${YELLOW}Retry $retry/5...${NC}"
+        sleep 2
     done
 
-    print_kv_row "Config File" "$CONFIG_FILE" "${GREEN}"
-    print_kv_row "Sysctl File" "$SYSCTL_FILE" "${GREEN}"
-    print_kv_row "Parameters Saved" "$count" "${GREEN}"
-    print_box_div "${GREEN}"
-    print_box_row "${GREEN}✓ Config will be loaded on boot${NC}" "center" "${GREEN}"
-    print_box_bottom "${GREEN}"
-}
-
-# 从文件加载配置
-load_config() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo -e "${RED}Config file not found: $CONFIG_FILE${NC}"
-        return 1
+    if lsmod | grep -q "^${module} "; then
+        rmmod -f $module 2>/dev/null || {
+            echo -e "${RED}Failed to unload. Reboot may be required.${NC}"
+            return 1
+        }
     fi
-
-    print_box_top "${CYAN}"
-    print_box_row "Loading Configuration" "center" "${CYAN}"
-    print_box_div "${CYAN}"
-
-    local count=0
-    local failed=0
-
-    while IFS= read -r line; do
-        # 跳过注释和空行
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "$line" ]] && continue
-
-        # 解析 key = value
-        if [[ "$line" =~ ^([a-z_]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-            param="${BASH_REMATCH[1]}"
-            value="${BASH_REMATCH[2]}"
-            # 去除尾部空格
-            value=$(echo "$value" | sed 's/[[:space:]]*$//')
-
-            if set_param "$param" "$value"; then
-                ((count++))
-            else
-                ((failed++))
-            fi
-        fi
-    done < "$CONFIG_FILE"
-
-    print_kv_row "Loaded" "${GREEN}$count${NC}" "${CYAN}"
-    if [[ $failed -gt 0 ]]; then
-        print_kv_row "Failed" "${RED}$failed${NC}" "${CYAN}"
-    fi
-    print_box_bottom "${CYAN}"
+    echo -e "${GREEN}Module unloaded.${NC}"
 }
 
 # 显示状态
 show_status() {
     print_box_top
-    print_box_row "LotSpeed v$VERSION Status" "center"
-    print_box_row "BBR v3 + FAST TCP + Hybla Hybrid" "center"
+    print_box_row "LotSpeed + NeoQ Status" "center"
     print_box_div
 
-    # 检查模块状态
-    if lsmod | grep -q lotspeed; then
-        print_kv_row "Module Status" "${GREEN}● Loaded${NC}"
-        REF_COUNT=$(lsmod | grep lotspeed | awk '{print $3}')
-        print_kv_row "Reference Count" "${CYAN}$REF_COUNT${NC}"
-        ACTIVE_CONNS=$(ss -tin 2>/dev/null | grep -c lotspeed || echo "0")
-        print_kv_row "Active Connections" "${CYAN}$ACTIVE_CONNS${NC}"
+    # 当前算法
+    local current=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    print_kv_row "Active CC Algorithm" "${CYAN}$current${NC}"
+
+    # LotSpeed 模块
+    if lsmod | grep -q "^lotspeed "; then
+        print_kv_row "LotSpeed Module" "${GREEN}● Loaded${NC}"
+        local ref=$(lsmod | grep "^lotspeed " | awk '{print $3}')
+        print_kv_row "  Reference Count" "$ref"
     else
-        print_kv_row "Module Status" "${RED}○ Not Loaded${NC}"
-        print_box_bottom
-        return
+        print_kv_row "LotSpeed Module" "${RED}○ Not Loaded${NC}"
     fi
 
-    # 检查当前算法
-    CURRENT=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-    if [[ "$CURRENT" == "lotspeed" ]]; then
-        print_kv_row "Active Algorithm" "${GREEN}lotspeed${NC}"
+    # NeoQ 模块
+    if lsmod | grep -q "^sch_neoq "; then
+        print_kv_row "NeoQ Module" "${GREEN}● Loaded${NC}"
+        local ref=$(lsmod | grep "^sch_neoq " | awk '{print $3}')
+        print_kv_row "  Reference Count" "$ref"
     else
-        print_kv_row "Active Algorithm" "${YELLOW}$CURRENT${NC}"
+        print_kv_row "NeoQ Module" "${RED}○ Not Loaded${NC}"
     fi
 
-    # 检查 sysctl 接口
+    # NeoQ qdisc
+    local neoq_qdisc=$(tc qdisc show 2>/dev/null | grep -c "neoq" || echo "0")
+    if [[ "$neoq_qdisc" -gt 0 ]]; then
+        print_kv_row "NeoQ Qdisc" "${GREEN}Active on $neoq_qdisc interface(s)${NC}"
+    fi
+
+    # sysctl 接口
     if [[ -d "$SYSCTL_PATH" ]]; then
-        print_kv_row "Sysctl Interface" "${GREEN}Available${NC}"
-    else
-        print_kv_row "Sysctl Interface" "${RED}Not Available${NC}"
-        print_box_bottom
-        return
+        print_kv_row "LotSpeed sysctl" "${GREEN}Available${NC}"
     fi
 
-    print_box_div
-    print_box_row "Current Parameters" "center"
-    print_box_div
-
-    # 基础参数
-    print_kv_row "min_cwnd" "$(get_param min_cwnd) packets"
-    print_kv_row "max_cwnd" "$(get_param max_cwnd) packets"
-    print_kv_row "beta" "$(get_param beta) ($(( $(get_param beta) * 100 / 1024 ))%)"
-
-    print_box_div
-    print_box_row "FAST TCP" "center"
-    print_box_div
-    print_kv_row "fast_alpha" "$(get_param fast_alpha) packets"
-    print_kv_row "fast_gamma" "$(get_param fast_gamma)%"
-
-    print_box_div
-    print_box_row "High Delay (Hybla)" "center"
-    print_box_div
-    local hd_en=$(get_param hd_enable)
-    if [[ "$hd_en" == "1" ]]; then
-        print_kv_row "hd_enable" "${GREEN}Enabled${NC}"
-    else
-        print_kv_row "hd_enable" "Disabled"
-    fi
-    print_kv_row "hd_thresh_us" "$(get_param hd_thresh_us) us ($(( $(get_param hd_thresh_us) / 1000 ))ms)"
-    print_kv_row "hd_cwnd_gain" "$(get_param hd_cwnd_gain)%"
-
-    print_box_div
-    print_box_row "ECN Support" "center"
-    print_box_div
-    local ecn_en=$(get_param ecn_enable)
-    if [[ "$ecn_en" == "1" ]]; then
-        print_kv_row "ecn_enable" "${GREEN}Enabled${NC}"
-    else
-        print_kv_row "ecn_enable" "Disabled"
-    fi
-    print_kv_row "ecn_alpha_gain" "$(get_param ecn_alpha_gain) (1/$(get_param ecn_alpha_gain))"
-    print_kv_row "ecn_thresh" "$(get_param ecn_thresh)%"
-
-    print_box_div
-    print_box_row "Brave Mode (Anti-Jitter)" "center"
-    print_box_div
-    local brave_en=$(get_param brave_enable)
-    if [[ "$brave_en" == "1" ]]; then
-        print_kv_row "brave_enable" "${GREEN}Enabled${NC}"
-    else
-        print_kv_row "brave_enable" "Disabled"
-    fi
-    print_kv_row "brave_hold_ms" "$(get_param brave_hold_ms) ms"
-
-    print_box_div
-    print_box_row "Fast Path" "center"
-    print_box_div
-    local fp_en=$(get_param fast_path)
-    if [[ "$fp_en" == "1" ]]; then
-        print_kv_row "fast_path" "${GREEN}Enabled${NC}"
-    else
-        print_kv_row "fast_path" "Disabled"
+    # /proc/net/neoq
+    if [[ -f /proc/net/neoq ]]; then
+        print_kv_row "NeoQ Stats" "${GREEN}/proc/net/neoq${NC}"
     fi
 
     print_box_bottom
 }
 
-# 显示所有参数
-show_all_params() {
-    print_box_top
-    print_box_row "All Parameters" "center"
-    print_box_div
+# 交互式菜单
+interactive_menu() {
+    while true; do
+        clear
+        print_box_top "${MAGENTA}"
+        print_box_row "LotSpeed + NeoQ Management" "center" "${MAGENTA}"
+        print_box_div "${MAGENTA}"
 
-    for param_file in $SYSCTL_PATH/*; do
-        if [[ -f "$param_file" ]]; then
-            param=$(basename "$param_file")
-            value=$(cat "$param_file" 2>/dev/null)
-            print_kv_row "$param" "$value"
-        fi
+        local current=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+        print_kv_row "Current Algorithm" "${CYAN}$current${NC}" "${MAGENTA}"
+        print_box_div "${MAGENTA}"
+
+        print_box_row "  ${BOLD}TCP Congestion Control${NC}" "left" "${MAGENTA}"
+        print_kv_row "1)" "Enable LotSpeed (BBR v3 Hybrid)" "${MAGENTA}"
+        print_kv_row "2)" "Disable LotSpeed (switch to default)" "${MAGENTA}"
+        print_box_div "${MAGENTA}"
+
+        print_box_row "  ${BOLD}Queue Discipline (NeoQ)${NC}" "left" "${MAGENTA}"
+        print_kv_row "3)" "Enable NeoQ on interface" "${MAGENTA}"
+        print_kv_row "4)" "Disable NeoQ on interface" "${MAGENTA}"
+        print_kv_row "5)" "Show NeoQ statistics" "${MAGENTA}"
+        print_box_div "${MAGENTA}"
+
+        print_box_row "  ${BOLD}Module Management${NC}" "left" "${MAGENTA}"
+        print_kv_row "6)" "Load all modules" "${MAGENTA}"
+        print_kv_row "7)" "Unload all modules (safe)" "${MAGENTA}"
+        print_box_div "${MAGENTA}"
+
+        print_box_row "  ${BOLD}Other${NC}" "left" "${MAGENTA}"
+        print_kv_row "8)" "Show status" "${MAGENTA}"
+        print_kv_row "9)" "LotSpeed parameters" "${MAGENTA}"
+        print_kv_row "0)" "Exit" "${MAGENTA}"
+        print_box_bottom "${MAGENTA}"
+
+        echo ""
+        read -p "Select option [0-9]: " choice
+
+        case $choice in
+            1)
+                echo ""
+                if ! lsmod | grep -q "^lotspeed "; then
+                    echo -e "${YELLOW}Loading LotSpeed module...${NC}"
+                    modprobe lotspeed 2>/dev/null || insmod $INSTALL_DIR/lotspeed.ko
+                    sleep 1
+                fi
+                sysctl -w net.ipv4.tcp_congestion_control=lotspeed
+                echo -e "${GREEN}LotSpeed enabled!${NC}"
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                echo ""
+                safe_unload "lotspeed" "lotspeed"
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                echo ""
+                echo -e "${CYAN}Available interfaces:${NC}"
+                ip -o link show | awk -F': ' '{print "  " $2}'
+                echo ""
+                read -p "Enter interface name (e.g., eth0): " iface
+                if [[ -n "$iface" ]]; then
+                    if ! lsmod | grep -q "^sch_neoq "; then
+                        echo -e "${YELLOW}Loading NeoQ module...${NC}"
+                        modprobe sch_neoq 2>/dev/null || insmod $INSTALL_DIR/sch_neoq.ko
+                        sleep 1
+                    fi
+                    tc qdisc replace dev $iface root neoq
+                    echo -e "${GREEN}NeoQ enabled on $iface${NC}"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            4)
+                echo ""
+                echo -e "${CYAN}Interfaces with NeoQ:${NC}"
+                tc qdisc show 2>/dev/null | grep neoq | awk '{print "  " $5}'
+                echo ""
+                read -p "Enter interface name: " iface
+                if [[ -n "$iface" ]]; then
+                    tc qdisc del dev $iface root 2>/dev/null
+                    echo -e "${GREEN}NeoQ disabled on $iface${NC}"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            5)
+                echo ""
+                if [[ -f /proc/net/neoq ]]; then
+                    cat /proc/net/neoq
+                else
+                    echo -e "${RED}NeoQ not active${NC}"
+                fi
+                echo ""
+                tc -s qdisc show 2>/dev/null | grep -A 20 neoq || true
+                read -p "Press Enter to continue..."
+                ;;
+            6)
+                echo ""
+                echo -e "${YELLOW}Loading modules...${NC}"
+                modprobe lotspeed 2>/dev/null || insmod $INSTALL_DIR/lotspeed.ko 2>/dev/null || true
+                modprobe sch_neoq 2>/dev/null || insmod $INSTALL_DIR/sch_neoq.ko 2>/dev/null || true
+                sleep 1
+                echo -e "${GREEN}Modules loaded.${NC}"
+                lsmod | grep -E "lotspeed|sch_neoq" || echo "No modules loaded"
+                read -p "Press Enter to continue..."
+                ;;
+            7)
+                echo ""
+                # 先禁用 NeoQ qdisc
+                echo -e "${YELLOW}Removing NeoQ qdiscs...${NC}"
+                for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
+                    tc qdisc del dev $iface root 2>/dev/null || true
+                done
+                sleep 1
+
+                # 卸载 NeoQ
+                if lsmod | grep -q "^sch_neoq "; then
+                    safe_unload "sch_neoq" ""
+                fi
+
+                # 卸载 LotSpeed
+                if lsmod | grep -q "^lotspeed "; then
+                    safe_unload "lotspeed" "lotspeed"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            8)
+                echo ""
+                show_status
+                read -p "Press Enter to continue..."
+                ;;
+            9)
+                echo ""
+                if [[ -d "$SYSCTL_PATH" ]]; then
+                    print_box_top
+                    print_box_row "LotSpeed Parameters" "center"
+                    print_box_div
+                    for f in $SYSCTL_PATH/*; do
+                        if [[ -f "$f" ]]; then
+                            local name=$(basename "$f")
+                            local val=$(cat "$f" 2>/dev/null)
+                            print_kv_row "$name" "$val"
+                        fi
+                    done
+                    print_box_bottom
+                else
+                    echo -e "${RED}LotSpeed sysctl interface not available${NC}"
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            0|q|Q)
+                echo -e "${GREEN}Goodbye!${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Invalid option${NC}"
+                sleep 1
+                ;;
+        esac
     done
-
-    print_box_bottom
 }
 
-# 预设配置
-apply_preset() {
-    PRESET=$1
-
-    print_box_top
-    print_box_row "Applying Preset: $PRESET" "center"
-    print_box_div
-
-    case $PRESET in
-        conservative)
-            set_param min_cwnd 4
-            set_param max_cwnd 10000
-            set_param beta 768
-            set_param fast_alpha 15
-            set_param fast_gamma 40
-            set_param hd_enable 1
-            set_param brave_enable 1
-            set_param ecn_enable 1
-            set_param fast_path 1
-            print_box_row "Conservative: Low aggression, high fairness" "left"
-            ;;
-        balanced)
-            set_param min_cwnd 4
-            set_param max_cwnd 15000
-            set_param beta 717
-            set_param fast_alpha 20
-            set_param fast_gamma 50
-            set_param hd_enable 1
-            set_param hd_cwnd_gain 150
-            set_param brave_enable 1
-            set_param ecn_enable 1
-            set_param fast_path 1
-            print_box_row "Balanced: Default settings" "left"
-            ;;
-        aggressive)
-            set_param min_cwnd 4
-            set_param max_cwnd 20000
-            set_param beta 614
-            set_param fast_alpha 30
-            set_param fast_gamma 60
-            set_param hd_enable 1
-            set_param hd_cwnd_gain 200
-            set_param hd_pacing_gain 150
-            set_param brave_enable 1
-            set_param brave_floor_pct 90
-            set_param ecn_enable 1
-            set_param fast_path 1
-            print_box_row "Aggressive: High throughput, more queue" "left"
-            ;;
-        highdelay)
-            set_param min_cwnd 10
-            set_param max_cwnd 20000
-            set_param beta 717
-            set_param fast_alpha 30
-            set_param fast_gamma 60
-            set_param hd_enable 1
-            set_param hd_thresh_us 100000
-            set_param hd_cwnd_gain 200
-            set_param hd_pacing_gain 150
-            set_param hd_min_cwnd 20
-            set_param hd_startup_boost 80
-            set_param brave_enable 1
-            set_param brave_hold_ms 500
-            set_param ecn_enable 0
-            set_param fast_path 1
-            print_box_row "High-Delay: Optimized for satellite/intercontinental" "left"
-            ;;
-        datacenter)
-            set_param min_cwnd 4
-            set_param max_cwnd 10000
-            set_param beta 768
-            set_param fast_alpha 10
-            set_param fast_gamma 30
-            set_param hd_enable 0
-            set_param brave_enable 0
-            set_param ecn_enable 1
-            set_param ecn_factor 90
-            set_param ecn_max_rtt_us 10000
-            set_param fast_path 1
-            print_box_row "Datacenter: Low latency, ECN-focused" "left"
-            ;;
-        *)
-            print_box_row "${RED}Unknown preset: $PRESET${NC}" "left"
-            print_box_div
-            print_box_row "Available presets:" "left"
-            print_kv_row "conservative" "Safe, fair with other flows"
-            print_kv_row "balanced" "Default settings"
-            print_kv_row "aggressive" "High throughput"
-            print_kv_row "highdelay" "Satellite/intercontinental"
-            print_kv_row "datacenter" "Low latency, ECN"
-            print_box_bottom
-            return 1
-            ;;
-    esac
-
-    print_box_div
-    print_box_row "${GREEN}✓ Preset applied. Use 'lotspeed save' to persist.${NC}" "center"
-    print_box_bottom
-}
-
-# 设置单个参数
-set_single_param() {
-    PARAM=$1
-    VALUE=$2
-
-    if [[ -z "$PARAM" ]] || [[ -z "$VALUE" ]]; then
-        print_box_top "${RED}"
-        print_box_row "Parameter Set Error" "center" "${RED}"
-        print_box_div "${RED}"
-        print_box_row "Usage: lotspeed set <parameter> <value>" "left" "${RED}"
-        print_box_div "${RED}"
-        print_box_row "Examples:" "left" "${RED}"
-        print_kv_row "lotspeed set min_cwnd 4" "" "${RED}"
-        print_kv_row "lotspeed set fast_alpha 25" "" "${RED}"
-        print_kv_row "lotspeed set hd_enable 1" "" "${RED}"
-        print_kv_row "lotspeed set ecn_enable 0" "" "${RED}"
-        print_box_bottom "${RED}"
-        return 1
-    fi
-
-    if set_param "$PARAM" "$VALUE"; then
-        print_box_top "${GREEN}"
-        print_box_row "Parameter Updated" "center" "${GREEN}"
-        print_box_div "${GREEN}"
-        print_kv_row "$PARAM" "$VALUE" "${GREEN}"
-        print_box_div "${GREEN}"
-        print_box_row "Use 'lotspeed save' to persist this change" "center" "${GREEN}"
-        print_box_bottom "${GREEN}"
-    else
-        echo -e "${RED}Error: Failed to set $PARAM${NC}"
-        echo -e "${YELLOW}Check if parameter exists: ls $SYSCTL_PATH/${NC}"
-        return 1
-    fi
-}
-
-# 编辑配置文件
-edit_config() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo -e "${YELLOW}Config file not found, creating default...${NC}"
-        save_config
-    fi
-
-    EDITOR=${EDITOR:-nano}
-    if ! command -v $EDITOR &>/dev/null; then
-        EDITOR=vi
-    fi
-
-    $EDITOR $CONFIG_FILE
-
-    echo ""
-    read -p "Load the edited config now? [Y/n] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        load_config
-        save_config  # 更新 sysctl.d 文件
-    fi
-}
-
-get_default_congestion_control() {
-    AVAILABLE=$(sysctl net.ipv4.tcp_available_congestion_control | awk -F= '{print $2}')
-    if echo "$AVAILABLE" | grep -q "cubic"; then echo "cubic";
-    elif echo "$AVAILABLE" | grep -q "reno"; then echo "reno";
-    elif echo "$AVAILABLE" | grep -q "bbr"; then echo "bbr";
-    else echo "$AVAILABLE" | awk '{print $1}'; fi
-}
-
-# ================= 主命令处理 =================
-case "$ACTION" in
+# 快速命令
+case "$1" in
     start)
         modprobe lotspeed 2>/dev/null || insmod $INSTALL_DIR/lotspeed.ko
         sleep 1
         sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null
-        # 加载保存的配置
-        if [[ -f "$CONFIG_FILE" ]]; then
-            load_config
-        fi
-        print_box_top "${GREEN}"
-        print_box_row "LotSpeed Started" "center" "${GREEN}"
-        print_box_bottom "${GREEN}"
+        echo -e "${GREEN}LotSpeed started${NC}"
         ;;
     stop)
-        DEFAULT_ALGO=$(get_default_congestion_control)
-        sysctl -w net.ipv4.tcp_congestion_control=$DEFAULT_ALGO >/dev/null 2>&1
-        rmmod lotspeed 2>/dev/null
-        print_box_top "${YELLOW}"
-        print_box_row "LotSpeed Stopped" "center" "${YELLOW}"
-        print_kv_row "Switched to" "$DEFAULT_ALGO" "${YELLOW}"
-        print_box_bottom "${YELLOW}"
+        safe_unload "lotspeed" "lotspeed"
         ;;
-    restart)
-        $0 stop
+    neoq-start)
+        iface="${2:-eth0}"
+        modprobe sch_neoq 2>/dev/null || insmod $INSTALL_DIR/sch_neoq.ko
         sleep 1
-        $0 start
+        tc qdisc replace dev $iface root neoq
+        echo -e "${GREEN}NeoQ started on $iface${NC}"
+        ;;
+    neoq-stop)
+        iface="${2:-eth0}"
+        tc qdisc del dev $iface root 2>/dev/null
+        echo -e "${GREEN}NeoQ stopped on $iface${NC}"
+        ;;
+    neoq-stats)
+        cat /proc/net/neoq 2>/dev/null || echo "NeoQ not active"
         ;;
     status)
         show_status
         ;;
-    params|all)
-        show_all_params
-        ;;
-    preset)
-        apply_preset "$2"
-        ;;
-    set)
-        set_single_param "$2" "$3"
-        ;;
-    save)
-        save_config
-        ;;
-    load)
-        load_config
-        ;;
-    edit)
-        edit_config
-        ;;
-    log|logs)
-        print_box_top
-        print_box_row "Kernel Logs (Last 20)" "center"
-        print_box_bottom
-        dmesg | grep -i lotspeed | tail -20
-        ;;
-    monitor)
-        echo -e "${CYAN}Monitoring logs (Ctrl+C to stop)...${NC}"
-        dmesg -w | grep --color=always -i lotspeed
+    menu|interactive|"")
+        interactive_menu
         ;;
     uninstall)
-        print_box_top "${MAGENTA}"
-        print_box_row "LotSpeed v$VERSION Uninstaller" "center" "${MAGENTA}"
-        print_box_div "${MAGENTA}"
+        print_box_top "${RED}"
+        print_box_row "Uninstalling LotSpeed + NeoQ" "center" "${RED}"
+        print_box_div "${RED}"
 
-        DEFAULT_ALGO=$(get_default_congestion_control)
-        print_box_row "Switching to $DEFAULT_ALGO..." "left" "${MAGENTA}"
-        sysctl -w net.ipv4.tcp_congestion_control=$DEFAULT_ALGO >/dev/null 2>&1
+        # 移除 NeoQ qdiscs
+        for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
+            tc qdisc del dev $iface root 2>/dev/null || true
+        done
 
-        if rmmod lotspeed 2>/dev/null; then
-            print_kv_row "Module Unload" "${GREEN}Success${NC}" "${MAGENTA}"
-        else
-            print_kv_row "Module Unload" "${YELLOW}In Use${NC}" "${MAGENTA}"
-            print_box_row "${YELLOW}Reboot required for complete removal${NC}" "center" "${MAGENTA}"
-        fi
+        # 卸载模块
+        safe_unload "sch_neoq" "" 2>/dev/null || true
+        safe_unload "lotspeed" "lotspeed" 2>/dev/null || true
 
-        print_box_row "Removing files..." "left" "${MAGENTA}"
+        # 清理文件
         rm -rf $INSTALL_DIR
         rm -f /etc/modules-load.d/lotspeed.conf
+        rm -f /etc/modules-load.d/sch_neoq.conf
         rm -f /lib/modules/$(uname -r)/kernel/net/ipv4/lotspeed.ko
+        rm -f /lib/modules/$(uname -r)/kernel/net/sched/sch_neoq.ko
         rm -f $CONFIG_FILE
-        rm -f $SYSCTL_FILE
+        rm -f /etc/sysctl.d/99-lotspeed.conf
+        rm -f /etc/systemd/system/lotspeed.service
         depmod -a
-        sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf
+        sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf 2>/dev/null || true
 
-        print_kv_row "Files Removed" "${GREEN}Done${NC}" "${MAGENTA}"
-        print_box_bottom "${MAGENTA}"
+        print_kv_row "Status" "${GREEN}Uninstalled${NC}" "${RED}"
+        print_box_bottom "${RED}"
 
         rm -f /usr/local/bin/lotspeed
         ;;
-    *)
+    help|--help|-h)
         print_box_top
-        print_box_row "LotSpeed v$VERSION Management" "center"
-        print_box_row "BBR v3 + FAST TCP + Hybla Hybrid" "center"
+        print_box_row "LotSpeed + NeoQ Commands" "center"
         print_box_div
-        print_kv_row "start" "Start LotSpeed"
-        print_kv_row "stop" "Stop LotSpeed"
-        print_kv_row "restart" "Restart LotSpeed"
-        print_kv_row "status" "Show status & key params"
-        print_kv_row "params" "Show all parameters"
-        print_box_div
-        print_kv_row "set <k> <v>" "Set parameter"
-        print_kv_row "preset <name>" "Apply preset config"
-        print_kv_row "save" "Save current config"
-        print_kv_row "load" "Load saved config"
-        print_kv_row "edit" "Edit config file"
-        print_box_div
-        print_kv_row "log" "Show kernel logs"
-        print_kv_row "monitor" "Live log monitoring"
-        print_kv_row "uninstall" "Remove completely"
-        print_box_div
-        print_box_row "Presets: conservative, balanced, aggressive," "left"
-        print_box_row "         highdelay, datacenter" "left"
+        print_kv_row "lotspeed" "Interactive menu"
+        print_kv_row "lotspeed start" "Enable LotSpeed CC"
+        print_kv_row "lotspeed stop" "Disable LotSpeed CC"
+        print_kv_row "lotspeed neoq-start [iface]" "Enable NeoQ qdisc"
+        print_kv_row "lotspeed neoq-stop [iface]" "Disable NeoQ qdisc"
+        print_kv_row "lotspeed neoq-stats" "Show NeoQ statistics"
+        print_kv_row "lotspeed status" "Show all status"
+        print_kv_row "lotspeed uninstall" "Remove everything"
         print_box_bottom
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Run 'lotspeed help' for usage"
         exit 1
         ;;
 esac
@@ -1012,12 +804,13 @@ SCRIPT_EOF
 }
 
 # ================= 创建 systemd 服务 =================
+
 create_systemd_service() {
-    log_info "Creating systemd service for config persistence..."
+    log_info "Creating systemd service..."
 
     cat > /etc/systemd/system/lotspeed.service << 'EOF'
 [Unit]
-Description=LotSpeed v2.0 Congestion Control
+Description=LotSpeed + NeoQ Network Optimization
 After=network.target
 
 [Service]
@@ -1033,64 +826,201 @@ EOF
     systemctl daemon-reload
     systemctl enable lotspeed.service >/dev/null 2>&1
 
-    log_success "Systemd service created and enabled"
+    log_success "Systemd service created"
 }
 
-# ================= 结尾显示 =================
-show_info() {
+# ================= 显示安装完成信息 =================
+
+show_completion() {
     echo ""
     print_box_top "${GREEN}"
-    print_box_row "LotSpeed v$VERSION Installation Complete!" "center" "${GREEN}"
-    print_box_row "BBR v3 + FAST TCP + Hybla Hybrid Edition" "center" "${GREEN}"
+    print_box_row "Installation Complete!" "center" "${GREEN}"
+    print_box_row "LotSpeed v2.0 + NeoQ v3.0" "center" "${GREEN}"
     print_box_bottom "${GREEN}"
 
     echo ""
-    /usr/local/bin/lotspeed status
-
-    echo ""
-    print_box_top "${YELLOW}"
-    print_box_row "Quick Start Guide" "center" "${YELLOW}"
-    print_box_div "${YELLOW}"
-    print_kv_row "Show status" "lotspeed status" "${YELLOW}"
-    print_kv_row "Show all params" "lotspeed params" "${YELLOW}"
-    print_kv_row "Set parameter" "lotspeed set fast_alpha 25" "${YELLOW}"
-    print_kv_row "Apply preset" "lotspeed preset balanced" "${YELLOW}"
-    print_kv_row "Save config" "lotspeed save" "${YELLOW}"
-    print_kv_row "Edit config" "lotspeed edit" "${YELLOW}"
-    print_box_div "${YELLOW}"
-    print_box_row "Config file: $CONFIG_FILE" "left" "${YELLOW}"
-    print_box_row "Sysctl path: /proc/sys/net/ipv4/lotspeed/" "left" "${YELLOW}"
-    print_box_bottom "${YELLOW}"
+    print_box_top "${CYAN}"
+    print_box_row "Quick Start" "center" "${CYAN}"
+    print_box_div "${CYAN}"
+    print_kv_row "Interactive Menu" "lotspeed" "${CYAN}"
+    print_box_div "${CYAN}"
+    print_kv_row "Enable LotSpeed" "lotspeed start" "${CYAN}"
+    print_kv_row "Enable NeoQ" "lotspeed neoq-start eth0" "${CYAN}"
+    print_kv_row "Show Status" "lotspeed status" "${CYAN}"
+    print_kv_row "NeoQ Stats" "cat /proc/net/neoq" "${CYAN}"
+    print_box_div "${CYAN}"
+    print_box_row "Run 'lotspeed' for interactive menu" "center" "${CYAN}"
+    print_box_bottom "${CYAN}"
     echo ""
 }
 
-error_exit() {
-    log_error "$1"
-    echo -e "${RED}Installation failed.${NC}"
-    exit 1
-}
+# ================= 交互式安装菜单 =================
 
-# ================= 主流程 =================
-main() {
+interactive_install() {
     clear
     print_banner
 
-    echo -e "${CYAN}Starting installation at $CURRENT_TIME${NC}"
+    print_box_top "${MAGENTA}"
+    print_box_row "Installation Options" "center" "${MAGENTA}"
+    print_box_div "${MAGENTA}"
+    print_kv_row "1)" "Install LotSpeed + NeoQ (Full)" "${MAGENTA}"
+    print_kv_row "2)" "Install LotSpeed only" "${MAGENTA}"
+    print_kv_row "3)" "Install NeoQ only" "${MAGENTA}"
+    print_kv_row "4)" "Uninstall everything" "${MAGENTA}"
+    print_kv_row "5)" "Check system status" "${MAGENTA}"
+    print_kv_row "0)" "Exit" "${MAGENTA}"
+    print_box_bottom "${MAGENTA}"
+
     echo ""
+    read -p "Select option [0-5]: " choice
 
-    check_root || error_exit "Root check failed"
-    check_system || error_exit "System check failed"
-    install_dependencies || error_exit "Dependency installation failed"
-    download_source || error_exit "Source download failed"
-    compile_module || error_exit "Module compilation failed"
-    load_module || error_exit "Module loading failed"
-    create_default_config || error_exit "Config creation failed"
-    create_management_script || error_exit "Script creation failed"
-    create_systemd_service || error_exit "Systemd service creation failed"
+    case $choice in
+        1)
+            echo ""
+            check_root
+            check_system
+            install_dependencies
+            download_source
+            compile_modules
+            install_modules
+            create_management_script
+            create_systemd_service
 
-    show_info
+            # 加载模块
+            log_info "Loading modules..."
+            insmod $INSTALL_DIR/lotspeed.ko 2>/dev/null || true
+            insmod $INSTALL_DIR/sch_neoq.ko 2>/dev/null || true
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] LotSpeed v$VERSION installed by $CURRENT_USER" >> /var/log/lotspeed_install.log
+            show_completion
+            ;;
+        2)
+            echo ""
+            check_root
+            check_system
+            install_dependencies
+
+            mkdir -p $INSTALL_DIR
+            cd $INSTALL_DIR
+            curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c
+
+            cat > Makefile << 'MF'
+obj-m += lotspeed.o
+KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+all:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+clean:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
+MF
+            make
+            cp lotspeed.ko /lib/modules/$(uname -r)/kernel/net/ipv4/
+            depmod -a
+            insmod lotspeed.ko
+            sysctl -w net.ipv4.tcp_congestion_control=lotspeed
+
+            create_management_script
+            log_success "LotSpeed installed and enabled!"
+            ;;
+        3)
+            echo ""
+            check_root
+            check_system
+            install_dependencies
+
+            mkdir -p $INSTALL_DIR
+            cd $INSTALL_DIR
+            curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/qdisc_newneo.c" -o qdisc_newneo.c
+
+            cat > Makefile << 'MF'
+obj-m += sch_neoq.o
+sch_neoq-objs := qdisc_newneo.o
+KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+ccflags-y := -std=gnu99
+all:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+clean:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
+MF
+            make
+            cp sch_neoq.ko /lib/modules/$(uname -r)/kernel/net/sched/
+            depmod -a
+            insmod sch_neoq.ko
+
+            create_management_script
+            log_success "NeoQ installed!"
+            echo -e "${CYAN}Enable with: tc qdisc add dev eth0 root neoq${NC}"
+            ;;
+        4)
+            echo ""
+            check_root
+            /usr/local/bin/lotspeed uninstall 2>/dev/null || {
+                # 手动卸载
+                for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
+                    tc qdisc del dev $iface root 2>/dev/null || true
+                done
+                local default_cc=$(get_default_cc)
+                sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+                rmmod sch_neoq 2>/dev/null || true
+                rmmod lotspeed 2>/dev/null || true
+                rm -rf $INSTALL_DIR
+                rm -f /usr/local/bin/lotspeed
+                rm -f /etc/systemd/system/lotspeed.service
+                systemctl daemon-reload 2>/dev/null || true
+            }
+            log_success "Uninstalled!"
+            ;;
+        5)
+            echo ""
+            /usr/local/bin/lotspeed status 2>/dev/null || {
+                echo -e "${CYAN}System Information:${NC}"
+                echo "  Kernel: $(uname -r)"
+                echo "  CC: $(sysctl -n net.ipv4.tcp_congestion_control)"
+                echo "  Available: $(sysctl -n net.ipv4.tcp_available_congestion_control)"
+                lsmod | grep -E "lotspeed|sch_neoq" && echo "" || echo "  No optimization modules loaded"
+            }
+            ;;
+        0)
+            echo -e "${GREEN}Goodbye!${NC}"
+            exit 0
+            ;;
+        *)
+            log_error "Invalid option"
+            exit 1
+            ;;
+    esac
 }
 
-main
+# ================= 主入口 =================
+
+main() {
+    # 如果有参数，直接安装
+    if [[ "$1" == "--full" ]] || [[ "$1" == "-f" ]]; then
+        clear
+        print_banner
+        check_root
+        check_system
+        install_dependencies
+        download_source
+        compile_modules
+        install_modules
+        create_management_script
+        create_systemd_service
+        insmod $INSTALL_DIR/lotspeed.ko 2>/dev/null || true
+        insmod $INSTALL_DIR/sch_neoq.ko 2>/dev/null || true
+        show_completion
+    elif [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
+        echo "Usage: $0 [options]"
+        echo ""
+        echo "Options:"
+        echo "  (no args)    Interactive installation menu"
+        echo "  --full, -f   Full automatic installation"
+        echo "  --help, -h   Show this help"
+        exit 0
+    else
+        # 交互式安装
+        interactive_install
+    fi
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] LotSpeed+NeoQ installed by $CURRENT_USER" >> /var/log/lotspeed_install.log 2>/dev/null || true
+}
+
+main "$@"
