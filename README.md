@@ -1,4 +1,4 @@
-### lotspeed merge_bl
+### lotspeed merge_bl (beta)
 
 <div align=center>
     <img src="https://github.com/uk0/lotspeed/blob/merge_bl/logo.png" width="400" height="400" />
@@ -18,6 +18,31 @@
 curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
 #   or
 wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
+
+
+# helper
+
+lotspeed status          # 查看状态
+lotspeed params          # 显示所有参数
+lotspeed set <k> <v>     # 设置参数
+lotspeed preset <name>   # 应用预设
+lotspeed save            # 保存当前配置
+lotspeed load            # 加载配置
+lotspeed edit            # 编辑配置文件
+
+# 调参
+lotspeed set fast_alpha 30
+lotspeed set hd_cwnd_gain 200
+  
+# 保存配置 (下次开机自动生效)
+lotspeed save
+
+# 或应用预设后保存
+lotspeed preset highdelay
+lotspeed save
+
+
+
 ```
 
 
@@ -173,14 +198,6 @@ sudo tc qdisc del dev eth0 root netem
 iperf3 -4 -s -p 35201
 iperf3 -c green1 -p 35201 -R -t 30
 ```
-
-
-### todo
-
-✅ 基于“时延+丢包”混合驱动的拥塞控制
-✅ 学习型状态机
-✅ 洲际场景适配
-
 
 
 ### speedtest 测试结果

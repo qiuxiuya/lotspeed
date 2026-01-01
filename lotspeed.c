@@ -133,7 +133,7 @@ struct lotspeed_params {
 
 /* 全局默认参数 */
 static struct lotspeed_params ls_params = {
-	.min_cwnd           = 4,
+	.min_cwnd           = 64,
 	.max_cwnd           = 15000,
 	.beta               = 717,          /* 70% */
 
