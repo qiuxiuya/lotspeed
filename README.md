@@ -227,6 +227,43 @@ PAC (Proactive ACK Control) for TCP Incast Congestion
 [QDISC_DOC](QDISC_DOC.md)
 
 
+### lotspeed helper
+```
+root@dev-kernel:/home/lotspeed# lotspeed help
+╔════════════════════════════════════════════════════════════════════╗
+║                      LotSpeed + NeoQ Commands                      ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Basic Commands                                                     ║
+║ lotspeed                                          Interactive menu ║
+║ lotspeed start                                  Enable LotSpeed CC ║
+║ lotspeed stop                                  Disable LotSpeed CC ║
+║ lotspeed restart                                  Restart LotSpeed ║
+║ lotspeed status                                    Show all status ║
+╟────────────────────────────────────────────────────────────────────╢
+║ NeoQ Qdisc                                                         ║
+║ lotspeed neoq-start [iface]                      Enable NeoQ qdisc ║
+║ lotspeed neoq-stop [iface]                      Disable NeoQ qdisc ║
+║ lotspeed neoq-stats                           Show NeoQ statistics ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Parameter Management                                               ║
+║ lotspeed params                                Show all parameters ║
+║ lotspeed set <k> <v>                          Set single parameter ║
+║ lotspeed preset <name>                         Apply preset config ║
+║ lotspeed save                                  Save current config ║
+║ lotspeed load                                    Load saved config ║
+║ lotspeed edit                                     Edit config file ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Other                                                              ║
+║ lotspeed log                                      Show kernel logs ║
+║ lotspeed monitor                               Live log monitoring ║
+║ lotspeed uninstall                               Remove everything ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Presets: conservative, balanced, aggressive,                       ║
+║          highdelay, datacenter                                     ║
+╚════════════════════════════════════════════════════════════════════╝
+```
+
+
 -----------------------------------
 
 

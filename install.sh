@@ -714,16 +714,354 @@ interactive_menu() {
     done
 }
 
+# ================= 参数操作函数 =================
+
+# 读取 sysctl 参数
+get_param() {
+    local param="$1"
+    if [[ -f "$SYSCTL_PATH/$param" ]]; then
+        cat "$SYSCTL_PATH/$param" 2>/dev/null
+    else
+        echo "N/A"
+    fi
+}
+
+# 设置 sysctl 参数
+set_param() {
+    local param="$1"
+    local value="$2"
+    if [[ -f "$SYSCTL_PATH/$param" ]]; then
+        echo "$value" > "$SYSCTL_PATH/$param" 2>/dev/null
+        return $?
+    else
+        return 1
+    fi
+}
+
+# 保存当前配置到文件
+save_config() {
+    print_box_top "${GREEN}"
+    print_box_row "Saving Configuration" "center" "${GREEN}"
+    print_box_div "${GREEN}"
+
+    # 创建配置文件
+    echo "# LotSpeed v2.0 Configuration" > $CONFIG_FILE
+    echo "# Saved at $(date '+%Y-%m-%d %H:%M:%S')" >> $CONFIG_FILE
+    echo "" >> $CONFIG_FILE
+
+    # 同时创建 sysctl.d 配置用于开机自动加载
+    local SYSCTL_CONF="/etc/sysctl.d/99-lotspeed.conf"
+    echo "# LotSpeed v2.0 sysctl configuration" > $SYSCTL_CONF
+    echo "# Auto-generated at $(date '+%Y-%m-%d %H:%M:%S')" >> $SYSCTL_CONF
+    echo "" >> $SYSCTL_CONF
+
+    local count=0
+    for param_file in $SYSCTL_PATH/*; do
+        if [[ -f "$param_file" ]]; then
+            local param=$(basename "$param_file")
+            local value=$(cat "$param_file" 2>/dev/null)
+            echo "$param = $value" >> $CONFIG_FILE
+            echo "net.ipv4.lotspeed.$param = $value" >> $SYSCTL_CONF
+            ((count++))
+        fi
+    done
+
+    print_kv_row "Config File" "$CONFIG_FILE" "${GREEN}"
+    print_kv_row "Sysctl File" "$SYSCTL_CONF" "${GREEN}"
+    print_kv_row "Parameters Saved" "$count" "${GREEN}"
+    print_box_div "${GREEN}"
+    print_box_row "${GREEN}Config will be loaded on boot${NC}" "center" "${GREEN}"
+    print_box_bottom "${GREEN}"
+}
+
+# 从文件加载配置
+load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${RED}Config file not found: $CONFIG_FILE${NC}"
+        return 1
+    fi
+
+    print_box_top "${CYAN}"
+    print_box_row "Loading Configuration" "center" "${CYAN}"
+    print_box_div "${CYAN}"
+
+    local count=0
+    local failed=0
+
+    while IFS= read -r line; do
+        # 跳过注释和空行
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$line" ]] && continue
+
+        # 解析 key = value
+        if [[ "$line" =~ ^([a-z_]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            local param="${BASH_REMATCH[1]}"
+            local value="${BASH_REMATCH[2]}"
+            value=$(echo "$value" | sed 's/[[:space:]]*$//')
+
+            if set_param "$param" "$value"; then
+                ((count++))
+            else
+                ((failed++))
+            fi
+        fi
+    done < "$CONFIG_FILE"
+
+    print_kv_row "Loaded" "${GREEN}$count${NC}" "${CYAN}"
+    if [[ $failed -gt 0 ]]; then
+        print_kv_row "Failed" "${RED}$failed${NC}" "${CYAN}"
+    fi
+    print_box_bottom "${CYAN}"
+}
+
+# 设置单个参数
+set_single_param() {
+    local param="$1"
+    local value="$2"
+
+    if [[ -z "$param" ]] || [[ -z "$value" ]]; then
+        print_box_top "${RED}"
+        print_box_row "Parameter Set Error" "center" "${RED}"
+        print_box_div "${RED}"
+        print_box_row "Usage: lotspeed set <param> <value>" "left" "${RED}"
+        print_box_div "${RED}"
+        print_box_row "Examples:" "left" "${RED}"
+        print_kv_row "lotspeed set min_cwnd 4" "" "${RED}"
+        print_kv_row "lotspeed set fast_alpha 25" "" "${RED}"
+        print_kv_row "lotspeed set hd_enable 1" "" "${RED}"
+        print_kv_row "lotspeed set ecn_enable 0" "" "${RED}"
+        print_box_bottom "${RED}"
+        return 1
+    fi
+
+    if set_param "$param" "$value"; then
+        print_box_top "${GREEN}"
+        print_box_row "Parameter Updated" "center" "${GREEN}"
+        print_box_div "${GREEN}"
+        print_kv_row "$param" "$value" "${GREEN}"
+        print_box_div "${GREEN}"
+        print_box_row "Use 'lotspeed save' to persist" "center" "${GREEN}"
+        print_box_bottom "${GREEN}"
+    else
+        echo -e "${RED}Error: Failed to set $param${NC}"
+        echo -e "${YELLOW}Check if parameter exists: ls $SYSCTL_PATH/${NC}"
+        return 1
+    fi
+}
+
+# 显示所有参数
+show_all_params() {
+    print_box_top
+    print_box_row "LotSpeed Parameters" "center"
+    print_box_div
+
+    if [[ ! -d "$SYSCTL_PATH" ]]; then
+        print_box_row "${RED}LotSpeed not loaded${NC}" "center"
+        print_box_bottom
+        return 1
+    fi
+
+    for param_file in $SYSCTL_PATH/*; do
+        if [[ -f "$param_file" ]]; then
+            local param=$(basename "$param_file")
+            local value=$(cat "$param_file" 2>/dev/null)
+            print_kv_row "$param" "$value"
+        fi
+    done
+
+    print_box_bottom
+}
+
+# 应用预设配置
+apply_preset() {
+    local preset="$1"
+
+    print_box_top
+    print_box_row "Applying Preset: $preset" "center"
+    print_box_div
+
+    case $preset in
+        conservative)
+            set_param min_cwnd 4
+            set_param max_cwnd 10000
+            set_param beta 768
+            set_param fast_alpha 15
+            set_param fast_gamma 40
+            set_param hd_enable 1
+            set_param brave_enable 1
+            set_param ecn_enable 1
+            set_param fast_path 1
+            print_box_row "Conservative: Low aggression, high fairness" "left"
+            ;;
+        balanced)
+            set_param min_cwnd 4
+            set_param max_cwnd 15000
+            set_param beta 717
+            set_param fast_alpha 20
+            set_param fast_gamma 50
+            set_param hd_enable 1
+            set_param hd_cwnd_gain 150
+            set_param brave_enable 1
+            set_param ecn_enable 1
+            set_param fast_path 1
+            print_box_row "Balanced: Default settings" "left"
+            ;;
+        aggressive)
+            set_param min_cwnd 4
+            set_param max_cwnd 20000
+            set_param beta 614
+            set_param fast_alpha 30
+            set_param fast_gamma 60
+            set_param hd_enable 1
+            set_param hd_cwnd_gain 200
+            set_param hd_pacing_gain 150
+            set_param brave_enable 1
+            set_param brave_floor_pct 90
+            set_param ecn_enable 1
+            set_param fast_path 1
+            print_box_row "Aggressive: High throughput, more queue" "left"
+            ;;
+        highdelay)
+            set_param min_cwnd 10
+            set_param max_cwnd 20000
+            set_param beta 717
+            set_param fast_alpha 30
+            set_param fast_gamma 60
+            set_param hd_enable 1
+            set_param hd_thresh_us 100000
+            set_param hd_cwnd_gain 200
+            set_param hd_pacing_gain 150
+            set_param hd_min_cwnd 20
+            set_param hd_startup_boost 80
+            set_param brave_enable 1
+            set_param brave_hold_ms 500
+            set_param ecn_enable 0
+            set_param fast_path 1
+            print_box_row "High-Delay: Satellite/intercontinental" "left"
+            ;;
+        datacenter)
+            set_param min_cwnd 4
+            set_param max_cwnd 10000
+            set_param beta 768
+            set_param fast_alpha 10
+            set_param fast_gamma 30
+            set_param hd_enable 0
+            set_param brave_enable 0
+            set_param ecn_enable 1
+            set_param ecn_factor 90
+            set_param ecn_max_rtt_us 10000
+            set_param fast_path 1
+            print_box_row "Datacenter: Low latency, ECN-focused" "left"
+            ;;
+        *)
+            print_box_row "${RED}Unknown preset: $preset${NC}" "left"
+            print_box_div
+            print_box_row "Available presets:" "left"
+            print_kv_row "conservative" "Safe, fair with other flows"
+            print_kv_row "balanced" "Default settings"
+            print_kv_row "aggressive" "High throughput"
+            print_kv_row "highdelay" "Satellite/intercontinental"
+            print_kv_row "datacenter" "Low latency, ECN"
+            print_box_bottom
+            return 1
+            ;;
+    esac
+
+    print_box_div
+    print_box_row "${GREEN}Preset applied. Use 'lotspeed save' to persist.${NC}" "center"
+    print_box_bottom
+}
+
+# 编辑配置文件
+edit_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${YELLOW}Config file not found, creating from current...${NC}"
+        save_config
+    fi
+
+    local editor=${EDITOR:-nano}
+    if ! command -v $editor &>/dev/null; then
+        editor=vi
+    fi
+
+    $editor $CONFIG_FILE
+
+    echo ""
+    read -p "Load the edited config now? [Y/n] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        load_config
+        save_config
+    fi
+}
+
+# 创建默认配置
+create_default_config() {
+    cat > $CONFIG_FILE << 'DEFCONF'
+# LotSpeed v2.0 Configuration File
+# BBR v3 + FAST TCP + Hybla Hybrid Edition
+
+# ============== 基础参数 ==============
+min_cwnd = 4
+max_cwnd = 15000
+beta = 717
+
+# ============== FAST TCP 延迟控制 ==============
+fast_alpha = 20
+fast_gamma = 50
+
+# ============== 高延迟优化 (Hybla) ==============
+hd_enable = 1
+hd_thresh_us = 150000
+hd_ref_us = 50000
+hd_boost = 25
+hd_rho_max = 400
+hd_cwnd_gain = 150
+hd_pacing_gain = 130
+hd_min_cwnd = 10
+hd_startup_boost = 50
+
+# ============== 勇敢模式 (抗抖动) ==============
+brave_enable = 1
+brave_rtt_pct = 25
+brave_hold_ms = 300
+brave_floor_pct = 85
+
+# ============== ECN 支持 ==============
+ecn_enable = 1
+ecn_factor = 85
+ecn_alpha_gain = 16
+ecn_thresh = 50
+
+# ============== 启动优化 ==============
+turbo_startup = 1
+startup_gain = 300
+
+# ============== 快速路径 ==============
+fast_path = 1
+DEFCONF
+    echo -e "${GREEN}Default config created at $CONFIG_FILE${NC}"
+}
+
 # 快速命令
 case "$1" in
     start)
         modprobe lotspeed 2>/dev/null || insmod $INSTALL_DIR/lotspeed.ko
         sleep 1
         sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null
+        # 加载保存的配置
+        if [[ -f "$CONFIG_FILE" ]]; then
+            load_config
+        fi
         echo -e "${GREEN}LotSpeed started${NC}"
         ;;
     stop)
         safe_unload "lotspeed" "lotspeed"
+        ;;
+    restart)
+        $0 stop
+        sleep 1
+        $0 start
         ;;
     neoq-start)
         iface="${2:-eth0}"
@@ -742,6 +1080,37 @@ case "$1" in
         ;;
     status)
         show_status
+        ;;
+    params|all)
+        show_all_params
+        ;;
+    set)
+        set_single_param "$2" "$3"
+        ;;
+    save)
+        save_config
+        ;;
+    load)
+        load_config
+        ;;
+    edit)
+        edit_config
+        ;;
+    preset)
+        apply_preset "$2"
+        ;;
+    default-config)
+        create_default_config
+        ;;
+    log|logs)
+        print_box_top
+        print_box_row "Kernel Logs (Last 20)" "center"
+        print_box_bottom
+        dmesg | grep -iE "lotspeed|neoq" | tail -20
+        ;;
+    monitor)
+        echo -e "${CYAN}Monitoring logs (Ctrl+C to stop)...${NC}"
+        dmesg -w | grep --color=always -iE "lotspeed|neoq"
         ;;
     menu|interactive|"")
         interactive_menu
@@ -781,14 +1150,33 @@ case "$1" in
         print_box_top
         print_box_row "LotSpeed + NeoQ Commands" "center"
         print_box_div
+        print_box_row "${BOLD}Basic Commands${NC}" "left"
         print_kv_row "lotspeed" "Interactive menu"
         print_kv_row "lotspeed start" "Enable LotSpeed CC"
         print_kv_row "lotspeed stop" "Disable LotSpeed CC"
+        print_kv_row "lotspeed restart" "Restart LotSpeed"
+        print_kv_row "lotspeed status" "Show all status"
+        print_box_div
+        print_box_row "${BOLD}NeoQ Qdisc${NC}" "left"
         print_kv_row "lotspeed neoq-start [iface]" "Enable NeoQ qdisc"
         print_kv_row "lotspeed neoq-stop [iface]" "Disable NeoQ qdisc"
         print_kv_row "lotspeed neoq-stats" "Show NeoQ statistics"
-        print_kv_row "lotspeed status" "Show all status"
+        print_box_div
+        print_box_row "${BOLD}Parameter Management${NC}" "left"
+        print_kv_row "lotspeed params" "Show all parameters"
+        print_kv_row "lotspeed set <k> <v>" "Set single parameter"
+        print_kv_row "lotspeed preset <name>" "Apply preset config"
+        print_kv_row "lotspeed save" "Save current config"
+        print_kv_row "lotspeed load" "Load saved config"
+        print_kv_row "lotspeed edit" "Edit config file"
+        print_box_div
+        print_box_row "${BOLD}Other${NC}" "left"
+        print_kv_row "lotspeed log" "Show kernel logs"
+        print_kv_row "lotspeed monitor" "Live log monitoring"
         print_kv_row "lotspeed uninstall" "Remove everything"
+        print_box_div
+        print_box_row "Presets: conservative, balanced, aggressive," "left"
+        print_box_row "         highdelay, datacenter" "left"
         print_box_bottom
         ;;
     *)
