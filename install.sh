@@ -1,21 +1,23 @@
 #!/bin/bash
 #
-# LotSpeed v5.6 - ml-tcp Auto-Scaling Edition (UI Enhanced)
-# Author: uk0 @ 2025-11-23
+# LotSpeed v2.0 - BBR v3 + FAST TCP + Hybla Hybrid Edition
+# Author: uk0 @ 2025
 # GitHub: https://github.com/uk0/lotspeed
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
 #
 
 set -e
 
 # ================= 配置区域 =================
 GITHUB_REPO="uk0/lotspeed"
-GITHUB_BRANCH="ml-tcp"
+GITHUB_BRANCH="merge_bl"
 INSTALL_DIR="/opt/lotspeed"
 MODULE_NAME="lotspeed"
-VERSION="5.6"
+VERSION="2.0"
+CONFIG_FILE="/etc/lotspeed.conf"
+SYSCTL_FILE="/etc/sysctl.d/99-lotspeed.conf"
 CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 CURRENT_USER=$(whoami)
 
@@ -29,32 +31,22 @@ CYAN='\033[0;36m'
 WHITE='\033[1;37m'
 NC='\033[0m' # No Color
 
-# ================= UI 核心算法 (安装脚本用) =================
+# ================= UI 核心算法 =================
 BOX_WIDTH=70
 
-# 计算视觉宽度 (忽略颜色代码, 中文/全角符号算2, 英文算1)
 get_width() {
     local str="$1"
-    # 移除 ANSI 颜色代码
     local clean_str=$(echo -e "$str" | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
-
     local width=0
     local len=${#clean_str}
-
     for ((i=0; i<len; i++)); do
         local char="${clean_str:$i:1}"
-        # 获取字符的 ASCII 值，简单的判断方法
         local ord=$(printf "%d" "'$char" 2>/dev/null || echo 128)
-        if [ "$ord" -gt 127 ]; then
-            ((width+=2))
-        else
-            ((width+=1))
-        fi
+        if [ "$ord" -gt 127 ]; then ((width+=2)); else ((width+=1)); fi
     done
     echo $width
 }
 
-# 打印重复字符
 repeat_char() {
     local char="$1"
     local count="$2"
@@ -63,7 +55,6 @@ repeat_char() {
     fi
 }
 
-# 绘制盒子顶部
 print_box_top() {
     local color="${1:-$CYAN}"
     echo -ne "${color}╔"
@@ -71,7 +62,6 @@ print_box_top() {
     echo -e "╗${NC}"
 }
 
-# 绘制盒子分隔线
 print_box_div() {
     local color="${1:-$CYAN}"
     echo -ne "${color}╟"
@@ -79,7 +69,6 @@ print_box_div() {
     echo -e "╢${NC}"
 }
 
-# 绘制盒子底部
 print_box_bottom() {
     local color="${1:-$CYAN}"
     echo -ne "${color}╚"
@@ -87,7 +76,6 @@ print_box_bottom() {
     echo -e "╝${NC}"
 }
 
-# 绘制内容行 (支持 align=left|center)
 print_box_row() {
     local content="$1"
     local align="${2:-left}"
@@ -95,11 +83,9 @@ print_box_row() {
 
     local content_width=$(get_width "$content")
     local total_padding=$((BOX_WIDTH - 2 - content_width))
-
     if [ $total_padding -lt 0 ]; then total_padding=0; fi
 
     echo -ne "${color}║${NC}"
-
     if [ "$align" == "center" ]; then
         local left_pad=$((total_padding / 2))
         local right_pad=$((total_padding - left_pad))
@@ -110,8 +96,23 @@ print_box_row() {
         echo -ne " $content"
         repeat_char " " $((total_padding - 1))
     fi
-
     echo -e "${color}║${NC}"
+}
+
+print_kv_row() {
+    local key="$1"
+    local val="$2"
+    local color="${3:-$CYAN}"
+
+    local key_width=$(get_width "$key")
+    local val_width=$(get_width "$val")
+    local available=$((BOX_WIDTH - 4))
+    local padding=$((available - key_width - val_width))
+    [ $padding -lt 1 ] && padding=1
+
+    echo -ne "${color}║${NC} $key"
+    repeat_char " " $padding
+    echo -e "$val ${color}║${NC}"
 }
 
 # ================= 基础日志函数 =================
@@ -132,8 +133,8 @@ print_banner() {
 ║     |_____\___/ \__|____/| .__/ \___|\___|\__,_|                     ║
 ║                          |_|                                         ║
 ║                                                                      ║
-║                 ML-TCP Auto-Scaling Edition                          ║
-║                       Version 5.6rc                                  ║
+║            BBR v3 + FAST TCP + Hybla Hybrid Edition                  ║
+║                       Version 2.0                                    ║
 ╚══════════════════════════════════════════════════════════════════════╝
 EOF
     echo -e "${NC}"
@@ -152,7 +153,6 @@ check_root() {
 check_system() {
     log_info "Checking system compatibility..."
 
-    # 检查 OS
     if [[ -f /etc/redhat-release ]]; then
         OS="centos"
         OS_VERSION=$(cat /etc/redhat-release | sed 's/.*release \([0-9]\).*/\1/')
@@ -168,17 +168,17 @@ check_system() {
         exit 1
     fi
 
-    # 检查内核版本
     KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
     KERNEL_MAJOR=$(echo $KERNEL_VERSION | cut -d. -f1)
     KERNEL_MINOR=$(echo $KERNEL_VERSION | cut -d. -f2)
 
-    if [[ $KERNEL_MAJOR -lt 4 ]] || ([[ $KERNEL_MAJOR -eq 4 ]] && [[ $KERNEL_MINOR -lt 9 ]]); then
-        log_error "Kernel version must be >= 4.9 (current: $(uname -r))"
+    # v2.0 需要 kernel 6.x+
+    if [[ $KERNEL_MAJOR -lt 6 ]]; then
+        log_error "Kernel version must be >= 6.0 (current: $(uname -r))"
+        log_info "LotSpeed v2.0 requires Linux Kernel 6.x+ for sysctl interface"
         exit 1
     fi
 
-    # 检查架构
     ARCH=$(uname -m)
     if [[ "$ARCH" != "x86_64" ]] && [[ "$ARCH" != "aarch64" ]]; then
         log_warn "Architecture $ARCH may not be fully tested"
@@ -209,13 +209,12 @@ install_dependencies() {
 download_source() {
     log_info "Downloading LotSpeed v$VERSION source code..."
 
-    # 创建安装目录
     mkdir -p $INSTALL_DIR
     cd $INSTALL_DIR
 
-    # 下载源代码
-    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c || {
-        log_error "Failed to download lotspeed.c"
+    # 下载 v2.0 源代码
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed_v2.c" -o lotspeed.c || {
+        log_error "Failed to download lotspeed_v2.c"
         exit 1
     }
 
@@ -224,13 +223,9 @@ download_source() {
 obj-m += lotspeed.o
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
-
-ccflags-y := -std=gnu99
-ifneq ($(shell printf '%s\n6.12.0\n$(KERNEL_RELEASE)' | sort -V | head -n1),6.12.0)
-ccflags-y += -DLOTSPEED_NEW_CONG_CONTROL_API
-endif
-
 PWD := $(shell pwd)
+
+ccflags-y := -std=gnu99 -Wno-declaration-after-statement
 
 all:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
@@ -260,9 +255,8 @@ compile_module() {
     cd $INSTALL_DIR
     make clean >/dev/null 2>&1
 
-    if ! make >/dev/null 2>&1; then
-        log_error "Compilation failed. Checking error..."
-        make 2>&1 | tail -20
+    if ! make 2>&1; then
+        log_error "Compilation failed"
         exit 1
     fi
 
@@ -277,17 +271,23 @@ compile_module() {
 load_module() {
     log_info "Loading LotSpeed v$VERSION module..."
 
-    # 卸载旧模块（如果存在）
     rmmod lotspeed 2>/dev/null || true
 
-    # 加载新模块
     insmod $INSTALL_DIR/lotspeed.ko || {
         log_error "Failed to load module"
         dmesg | tail -10
         exit 1
     }
 
-    # 设置为默认拥塞控制算法
+    # 等待 sysctl 接口就绪
+    sleep 1
+
+    # 检查 sysctl 接口
+    if [[ ! -d /proc/sys/net/ipv4/lotspeed ]]; then
+        log_error "sysctl interface not available at /proc/sys/net/ipv4/lotspeed"
+        exit 1
+    fi
+
     sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null 2>&1
 
     # 持久化设置
@@ -295,7 +295,6 @@ load_module() {
         echo "net.ipv4.tcp_congestion_control=lotspeed" >> /etc/sysctl.conf
     fi
 
-    # 设置开机自动加载
     echo "lotspeed" > /etc/modules-load.d/lotspeed.conf
     cp $INSTALL_DIR/lotspeed.ko /lib/modules/$(uname -r)/kernel/net/ipv4/ 2>/dev/null || true
     depmod -a
@@ -303,18 +302,119 @@ load_module() {
     log_success "Module loaded and set as default"
 }
 
-# ================= 创建管理脚本 (嵌入 UI 算法) =================
+# ================= 创建默认配置文件 =================
+create_default_config() {
+    log_info "Creating default configuration..."
+
+    cat > $CONFIG_FILE << 'EOF'
+# LotSpeed v2.0 Configuration File
+# BBR v3 + FAST TCP + Hybla Hybrid Edition
+#
+# This file is loaded at boot and when running 'lotspeed load'
+# Edit with: lotspeed edit
+# Save current: lotspeed save
+# Load config: lotspeed load
+#
+
+# ============== 基础参数 ==============
+min_cwnd = 4
+max_cwnd = 15000
+beta = 717
+
+# ============== FAST TCP 延迟控制 ==============
+fast_alpha = 20
+fast_gamma = 50
+
+# ============== 高延迟优化 (Hybla) ==============
+hd_enable = 1
+hd_thresh_us = 150000
+hd_ref_us = 50000
+hd_boost = 25
+hd_rho_max = 400
+hd_cwnd_gain = 150
+hd_pacing_gain = 130
+hd_min_cwnd = 10
+hd_startup_boost = 50
+
+# ============== 勇敢模式 (抗抖动) ==============
+brave_enable = 1
+brave_rtt_pct = 25
+brave_hold_ms = 300
+brave_floor_pct = 85
+
+# ============== 历史缓存 ==============
+hist_enable = 1
+hist_ttl_sec = 1200
+hist_max_entries = 8192
+
+# ============== ECN 支持 ==============
+ecn_enable = 1
+ecn_factor = 85
+ecn_alpha_gain = 16
+ecn_alpha_init = 256
+ecn_thresh = 50
+ecn_max_rtt_us = 5000
+full_ecn_cnt = 2
+ecn_reprobe_gain = 50
+
+# ============== 启动优化 ==============
+turbo_startup = 1
+startup_gain = 300
+startup_min_rounds = 3
+
+# ============== ACK 聚合 ==============
+ack_agg_enable = 1
+extra_acked_max_us = 100000
+
+# ============== 恢复优化 ==============
+fast_recovery = 1
+recovery_boost = 20
+
+# ============== Pacing ==============
+pacing_margin = 2
+burst_mode = 0
+
+# ============== PROBE_RTT ==============
+probe_rtt_cwnd_pct = 50
+probe_rtt_duration = 150
+
+# ============== TSO ==============
+tso_rtt_shift = 9
+
+# ============== 快速路径 ==============
+fast_path = 1
+
+# ============== 丢包检测 ==============
+loss_thresh = 2
+full_loss_cnt = 6
+inflight_headroom = 15
+
+# ============== 带宽探测 ==============
+bw_probe_max_rounds = 63
+bw_probe_base_us = 2000000
+bw_probe_rand_us = 1000000
+bw_probe_cwnd_gain = 1
+EOF
+
+    chmod 644 $CONFIG_FILE
+    log_success "Default config created at $CONFIG_FILE"
+}
+
+# ================= 创建管理脚本 =================
 create_management_script() {
     log_info "Creating management script..."
 
-    # 使用 'SCRIPT_EOF' 避免变量在此时展开，而是在生成的脚本运行时展开
     cat > /usr/local/bin/lotspeed << 'SCRIPT_EOF'
 #!/bin/bash
-# LotSpeed Management Script (Auto-Aligned UI)
+# LotSpeed v2.0 Management Script
+# sysctl-based parameter management
 
 ACTION=$1
 INSTALL_DIR="/opt/lotspeed"
-VERSION="5.6"
+VERSION="2.0"
+CONFIG_FILE="/etc/lotspeed.conf"
+SYSCTL_FILE="/etc/sysctl.d/99-lotspeed.conf"
+SYSCTL_PATH="/proc/sys/net/ipv4/lotspeed"
 
 # 颜色
 RED='\033[0;31m'
@@ -326,10 +426,9 @@ WHITE='\033[1;37m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# ================= UI 算法 (嵌入) =================
+# ================= UI 算法 =================
 BOX_WIDTH=70
 
-# 计算视觉宽度
 get_width() {
     local str="$1"
     local clean_str=$(echo -e "$str" | sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[mGK]//g")
@@ -391,7 +490,6 @@ print_box_row() {
     echo -e "${color}║${NC}"
 }
 
-# 打印键值对行 (Left Key ...... Right Value)
 print_kv_row() {
     local key="$1"
     local val="$2"
@@ -399,11 +497,8 @@ print_kv_row() {
 
     local key_width=$(get_width "$key")
     local val_width=$(get_width "$val")
-
-    # 左右各1空格Padding + 中间
     local available=$((BOX_WIDTH - 4))
     local padding=$((available - key_width - val_width))
-
     [ $padding -lt 1 ] && padding=1
 
     echo -ne "${color}║${NC} $key"
@@ -411,32 +506,378 @@ print_kv_row() {
     echo -e "$val ${color}║${NC}"
 }
 
-# ================= 业务逻辑 =================
+# ================= 参数操作 =================
 
-format_bytes() {
-    local bytes=$1
-    if [[ $bytes -ge 1000000000 ]]; then
-        echo "$(echo "scale=2; $bytes/1000000000" | bc) GB/s"
-    elif [[ $bytes -ge 1000000 ]]; then
-        echo "$(echo "scale=2; $bytes/1000000" | bc) MB/s"
-    elif [[ $bytes -ge 1000 ]]; then
-        echo "$(echo "scale=2; $bytes/1000" | bc) KB/s"
+# 读取 sysctl 参数
+get_param() {
+    local param="$1"
+    if [[ -f "$SYSCTL_PATH/$param" ]]; then
+        cat "$SYSCTL_PATH/$param" 2>/dev/null
     else
-        echo "$bytes B/s"
+        echo "N/A"
     fi
 }
 
-format_bps() {
-    local bytes=$1
-    local bits=$((bytes * 8))
-    if [[ $bits -ge 1000000000 ]]; then
-        echo "$(echo "scale=2; $bits/1000000000" | bc) Gbps"
-    elif [[ $bits -ge 1000000 ]]; then
-        echo "$(echo "scale=2; $bits/1000000" | bc) Mbps"
-    elif [[ $bits -ge 1000 ]]; then
-        echo "$(echo "scale=2; $bits/1000" | bc) Kbps"
+# 设置 sysctl 参数
+set_param() {
+    local param="$1"
+    local value="$2"
+    if [[ -f "$SYSCTL_PATH/$param" ]]; then
+        echo "$value" > "$SYSCTL_PATH/$param" 2>/dev/null
+        return $?
     else
-        echo "$bits bps"
+        return 1
+    fi
+}
+
+# 保存当前配置到文件
+save_config() {
+    print_box_top "${GREEN}"
+    print_box_row "Saving Configuration" "center" "${GREEN}"
+    print_box_div "${GREEN}"
+
+    # 创建配置文件
+    echo "# LotSpeed v$VERSION Configuration" > $CONFIG_FILE
+    echo "# Saved at $(date '+%Y-%m-%d %H:%M:%S')" >> $CONFIG_FILE
+    echo "" >> $CONFIG_FILE
+
+    # 同时创建 sysctl.d 配置用于开机自动加载
+    echo "# LotSpeed v$VERSION sysctl configuration" > $SYSCTL_FILE
+    echo "# Auto-generated at $(date '+%Y-%m-%d %H:%M:%S')" >> $SYSCTL_FILE
+    echo "" >> $SYSCTL_FILE
+
+    local count=0
+    for param_file in $SYSCTL_PATH/*; do
+        if [[ -f "$param_file" ]]; then
+            param=$(basename "$param_file")
+            value=$(cat "$param_file" 2>/dev/null)
+            echo "$param = $value" >> $CONFIG_FILE
+            echo "net.ipv4.lotspeed.$param = $value" >> $SYSCTL_FILE
+            ((count++))
+        fi
+    done
+
+    print_kv_row "Config File" "$CONFIG_FILE" "${GREEN}"
+    print_kv_row "Sysctl File" "$SYSCTL_FILE" "${GREEN}"
+    print_kv_row "Parameters Saved" "$count" "${GREEN}"
+    print_box_div "${GREEN}"
+    print_box_row "${GREEN}✓ Config will be loaded on boot${NC}" "center" "${GREEN}"
+    print_box_bottom "${GREEN}"
+}
+
+# 从文件加载配置
+load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${RED}Config file not found: $CONFIG_FILE${NC}"
+        return 1
+    fi
+
+    print_box_top "${CYAN}"
+    print_box_row "Loading Configuration" "center" "${CYAN}"
+    print_box_div "${CYAN}"
+
+    local count=0
+    local failed=0
+
+    while IFS= read -r line; do
+        # 跳过注释和空行
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$line" ]] && continue
+
+        # 解析 key = value
+        if [[ "$line" =~ ^([a-z_]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            param="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            # 去除尾部空格
+            value=$(echo "$value" | sed 's/[[:space:]]*$//')
+
+            if set_param "$param" "$value"; then
+                ((count++))
+            else
+                ((failed++))
+            fi
+        fi
+    done < "$CONFIG_FILE"
+
+    print_kv_row "Loaded" "${GREEN}$count${NC}" "${CYAN}"
+    if [[ $failed -gt 0 ]]; then
+        print_kv_row "Failed" "${RED}$failed${NC}" "${CYAN}"
+    fi
+    print_box_bottom "${CYAN}"
+}
+
+# 显示状态
+show_status() {
+    print_box_top
+    print_box_row "LotSpeed v$VERSION Status" "center"
+    print_box_row "BBR v3 + FAST TCP + Hybla Hybrid" "center"
+    print_box_div
+
+    # 检查模块状态
+    if lsmod | grep -q lotspeed; then
+        print_kv_row "Module Status" "${GREEN}● Loaded${NC}"
+        REF_COUNT=$(lsmod | grep lotspeed | awk '{print $3}')
+        print_kv_row "Reference Count" "${CYAN}$REF_COUNT${NC}"
+        ACTIVE_CONNS=$(ss -tin 2>/dev/null | grep -c lotspeed || echo "0")
+        print_kv_row "Active Connections" "${CYAN}$ACTIVE_CONNS${NC}"
+    else
+        print_kv_row "Module Status" "${RED}○ Not Loaded${NC}"
+        print_box_bottom
+        return
+    fi
+
+    # 检查当前算法
+    CURRENT=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "$CURRENT" == "lotspeed" ]]; then
+        print_kv_row "Active Algorithm" "${GREEN}lotspeed${NC}"
+    else
+        print_kv_row "Active Algorithm" "${YELLOW}$CURRENT${NC}"
+    fi
+
+    # 检查 sysctl 接口
+    if [[ -d "$SYSCTL_PATH" ]]; then
+        print_kv_row "Sysctl Interface" "${GREEN}Available${NC}"
+    else
+        print_kv_row "Sysctl Interface" "${RED}Not Available${NC}"
+        print_box_bottom
+        return
+    fi
+
+    print_box_div
+    print_box_row "Current Parameters" "center"
+    print_box_div
+
+    # 基础参数
+    print_kv_row "min_cwnd" "$(get_param min_cwnd) packets"
+    print_kv_row "max_cwnd" "$(get_param max_cwnd) packets"
+    print_kv_row "beta" "$(get_param beta) ($(( $(get_param beta) * 100 / 1024 ))%)"
+
+    print_box_div
+    print_box_row "FAST TCP" "center"
+    print_box_div
+    print_kv_row "fast_alpha" "$(get_param fast_alpha) packets"
+    print_kv_row "fast_gamma" "$(get_param fast_gamma)%"
+
+    print_box_div
+    print_box_row "High Delay (Hybla)" "center"
+    print_box_div
+    local hd_en=$(get_param hd_enable)
+    if [[ "$hd_en" == "1" ]]; then
+        print_kv_row "hd_enable" "${GREEN}Enabled${NC}"
+    else
+        print_kv_row "hd_enable" "Disabled"
+    fi
+    print_kv_row "hd_thresh_us" "$(get_param hd_thresh_us) us ($(( $(get_param hd_thresh_us) / 1000 ))ms)"
+    print_kv_row "hd_cwnd_gain" "$(get_param hd_cwnd_gain)%"
+
+    print_box_div
+    print_box_row "ECN Support" "center"
+    print_box_div
+    local ecn_en=$(get_param ecn_enable)
+    if [[ "$ecn_en" == "1" ]]; then
+        print_kv_row "ecn_enable" "${GREEN}Enabled${NC}"
+    else
+        print_kv_row "ecn_enable" "Disabled"
+    fi
+    print_kv_row "ecn_alpha_gain" "$(get_param ecn_alpha_gain) (1/$(get_param ecn_alpha_gain))"
+    print_kv_row "ecn_thresh" "$(get_param ecn_thresh)%"
+
+    print_box_div
+    print_box_row "Brave Mode (Anti-Jitter)" "center"
+    print_box_div
+    local brave_en=$(get_param brave_enable)
+    if [[ "$brave_en" == "1" ]]; then
+        print_kv_row "brave_enable" "${GREEN}Enabled${NC}"
+    else
+        print_kv_row "brave_enable" "Disabled"
+    fi
+    print_kv_row "brave_hold_ms" "$(get_param brave_hold_ms) ms"
+
+    print_box_div
+    print_box_row "Fast Path" "center"
+    print_box_div
+    local fp_en=$(get_param fast_path)
+    if [[ "$fp_en" == "1" ]]; then
+        print_kv_row "fast_path" "${GREEN}Enabled${NC}"
+    else
+        print_kv_row "fast_path" "Disabled"
+    fi
+
+    print_box_bottom
+}
+
+# 显示所有参数
+show_all_params() {
+    print_box_top
+    print_box_row "All Parameters" "center"
+    print_box_div
+
+    for param_file in $SYSCTL_PATH/*; do
+        if [[ -f "$param_file" ]]; then
+            param=$(basename "$param_file")
+            value=$(cat "$param_file" 2>/dev/null)
+            print_kv_row "$param" "$value"
+        fi
+    done
+
+    print_box_bottom
+}
+
+# 预设配置
+apply_preset() {
+    PRESET=$1
+
+    print_box_top
+    print_box_row "Applying Preset: $PRESET" "center"
+    print_box_div
+
+    case $PRESET in
+        conservative)
+            set_param min_cwnd 4
+            set_param max_cwnd 10000
+            set_param beta 768
+            set_param fast_alpha 15
+            set_param fast_gamma 40
+            set_param hd_enable 1
+            set_param brave_enable 1
+            set_param ecn_enable 1
+            set_param fast_path 1
+            print_box_row "Conservative: Low aggression, high fairness" "left"
+            ;;
+        balanced)
+            set_param min_cwnd 4
+            set_param max_cwnd 15000
+            set_param beta 717
+            set_param fast_alpha 20
+            set_param fast_gamma 50
+            set_param hd_enable 1
+            set_param hd_cwnd_gain 150
+            set_param brave_enable 1
+            set_param ecn_enable 1
+            set_param fast_path 1
+            print_box_row "Balanced: Default settings" "left"
+            ;;
+        aggressive)
+            set_param min_cwnd 4
+            set_param max_cwnd 20000
+            set_param beta 614
+            set_param fast_alpha 30
+            set_param fast_gamma 60
+            set_param hd_enable 1
+            set_param hd_cwnd_gain 200
+            set_param hd_pacing_gain 150
+            set_param brave_enable 1
+            set_param brave_floor_pct 90
+            set_param ecn_enable 1
+            set_param fast_path 1
+            print_box_row "Aggressive: High throughput, more queue" "left"
+            ;;
+        highdelay)
+            set_param min_cwnd 10
+            set_param max_cwnd 20000
+            set_param beta 717
+            set_param fast_alpha 30
+            set_param fast_gamma 60
+            set_param hd_enable 1
+            set_param hd_thresh_us 100000
+            set_param hd_cwnd_gain 200
+            set_param hd_pacing_gain 150
+            set_param hd_min_cwnd 20
+            set_param hd_startup_boost 80
+            set_param brave_enable 1
+            set_param brave_hold_ms 500
+            set_param ecn_enable 0
+            set_param fast_path 1
+            print_box_row "High-Delay: Optimized for satellite/intercontinental" "left"
+            ;;
+        datacenter)
+            set_param min_cwnd 4
+            set_param max_cwnd 10000
+            set_param beta 768
+            set_param fast_alpha 10
+            set_param fast_gamma 30
+            set_param hd_enable 0
+            set_param brave_enable 0
+            set_param ecn_enable 1
+            set_param ecn_factor 90
+            set_param ecn_max_rtt_us 10000
+            set_param fast_path 1
+            print_box_row "Datacenter: Low latency, ECN-focused" "left"
+            ;;
+        *)
+            print_box_row "${RED}Unknown preset: $PRESET${NC}" "left"
+            print_box_div
+            print_box_row "Available presets:" "left"
+            print_kv_row "conservative" "Safe, fair with other flows"
+            print_kv_row "balanced" "Default settings"
+            print_kv_row "aggressive" "High throughput"
+            print_kv_row "highdelay" "Satellite/intercontinental"
+            print_kv_row "datacenter" "Low latency, ECN"
+            print_box_bottom
+            return 1
+            ;;
+    esac
+
+    print_box_div
+    print_box_row "${GREEN}✓ Preset applied. Use 'lotspeed save' to persist.${NC}" "center"
+    print_box_bottom
+}
+
+# 设置单个参数
+set_single_param() {
+    PARAM=$1
+    VALUE=$2
+
+    if [[ -z "$PARAM" ]] || [[ -z "$VALUE" ]]; then
+        print_box_top "${RED}"
+        print_box_row "Parameter Set Error" "center" "${RED}"
+        print_box_div "${RED}"
+        print_box_row "Usage: lotspeed set <parameter> <value>" "left" "${RED}"
+        print_box_div "${RED}"
+        print_box_row "Examples:" "left" "${RED}"
+        print_kv_row "lotspeed set min_cwnd 4" "" "${RED}"
+        print_kv_row "lotspeed set fast_alpha 25" "" "${RED}"
+        print_kv_row "lotspeed set hd_enable 1" "" "${RED}"
+        print_kv_row "lotspeed set ecn_enable 0" "" "${RED}"
+        print_box_bottom "${RED}"
+        return 1
+    fi
+
+    if set_param "$PARAM" "$VALUE"; then
+        print_box_top "${GREEN}"
+        print_box_row "Parameter Updated" "center" "${GREEN}"
+        print_box_div "${GREEN}"
+        print_kv_row "$PARAM" "$VALUE" "${GREEN}"
+        print_box_div "${GREEN}"
+        print_box_row "Use 'lotspeed save' to persist this change" "center" "${GREEN}"
+        print_box_bottom "${GREEN}"
+    else
+        echo -e "${RED}Error: Failed to set $PARAM${NC}"
+        echo -e "${YELLOW}Check if parameter exists: ls $SYSCTL_PATH/${NC}"
+        return 1
+    fi
+}
+
+# 编辑配置文件
+edit_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${YELLOW}Config file not found, creating default...${NC}"
+        save_config
+    fi
+
+    EDITOR=${EDITOR:-nano}
+    if ! command -v $EDITOR &>/dev/null; then
+        EDITOR=vi
+    fi
+
+    $EDITOR $CONFIG_FILE
+
+    echo ""
+    read -p "Load the edited config now? [Y/n] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        load_config
+        save_config  # 更新 sysctl.d 文件
     fi
 }
 
@@ -448,246 +889,16 @@ get_default_congestion_control() {
     else echo "$AVAILABLE" | awk '{print $1}'; fi
 }
 
-show_status() {
-    print_box_top
-    print_box_row "LotSpeed v$VERSION Status (ML-TCP)" "center"
-    print_box_div
-
-    # 检查模块状态
-    if lsmod | grep -q lotspeed; then
-        print_kv_row "Module Status" "${GREEN}Loaded${NC}"
-
-        REF_COUNT=$(lsmod | grep lotspeed | awk '{print $3}')
-        print_kv_row "Reference Count" "${CYAN}$REF_COUNT${NC}"
-
-        # 修复：确保 ACTIVE_CONNS 只是一个数字，没有换行
-        ACTIVE_CONNS=$(ss -tin 2>/dev/null | grep -c lotspeed || echo "0")
-        # 去除可能的换行和空格
-        ACTIVE_CONNS=$(echo $ACTIVE_CONNS | tr -d '\n' | tr -d ' ')
-        print_kv_row "Active Connections" "${CYAN}$ACTIVE_CONNS${NC}"
-    else
-        print_kv_row "Module Status" "${RED}○ Not Loaded${NC}"
-        print_box_bottom
-        return
-    fi
-
-    # 检查当前算法
-    CURRENT=$(sysctl -n net.ipv4.tcp_congestion_control)
-    if [[ "$CURRENT" == "lotspeed" ]]; then
-        print_kv_row "Active Algorithm" "${GREEN}lotspeed${NC}"
-    else
-        print_kv_row "Active Algorithm" "${YELLOW}$CURRENT${NC}"
-    fi
-
-    print_box_div
-    print_box_row "Current Parameters" "center"
-    print_box_div
-
-    if [[ -d /sys/module/lotspeed/parameters ]]; then
-        for param in lotserver_rate lotserver_min_cwnd lotserver_max_cwnd lotserver_beta \
-                     lotserver_turbo lotserver_safe_mode lotserver_fast_alpha lotserver_fast_gamma \
-                     lotserver_fast_ss_exit lotserver_hd_enable lotserver_hd_thresh_us \
-                     lotserver_hd_ref_us lotserver_hd_gamma_boost lotserver_hd_alpha_boost \
-                     lotserver_brave_enable lotserver_brave_rtt_pct lotserver_brave_hold_ms \
-                     lotserver_brave_floor_pct lotserver_brave_push_pct; do
-
-            param_file="/sys/module/lotspeed/parameters/$param"
-            if [[ -f "$param_file" ]]; then
-                value=$(cat $param_file 2>/dev/null)
-                case $param in
-                    lotserver_rate)
-                        formatted=$(format_bytes $value)
-                        bps=$(format_bps $value)
-                        print_kv_row "Global Rate Limit" "$formatted ($bps)"
-                        ;;
-                    lotserver_beta)
-                        beta_val=$((value * 100 / 1024))
-                        print_kv_row "Fairness (Beta)" "${beta_val}%"
-                        ;;
-                    lotserver_min_cwnd)
-                        print_kv_row "Min CWND" "$value packets"
-                        ;;
-                    lotserver_max_cwnd)
-                        print_kv_row "Max CWND" "$value packets"
-                        ;;
-                    lotserver_turbo)
-                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
-                            print_kv_row "Turbo Mode" "${YELLOW}Enabled ⚡${NC}"
-                        else
-                            print_kv_row "Turbo Mode" "Disabled"
-                        fi
-                        ;;
-                    lotserver_safe_mode)
-                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
-                            print_kv_row "Safe Mode" "${GREEN}Enabled${NC}"
-                        else
-                            print_kv_row "Safe Mode" "Disabled"
-                        fi
-                        ;;
-                    lotserver_fast_alpha)
-                        print_kv_row "FAST Alpha" "$value packets"
-                        ;;
-                    lotserver_fast_gamma)
-                        print_kv_row "FAST Gamma" "${value}%"
-                        ;;
-                    lotserver_fast_ss_exit)
-                        print_kv_row "SS Exit Threshold" "${value}%"
-                        ;;
-                    lotserver_hd_enable)
-                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
-                            print_kv_row "High-Delay Mode" "${GREEN}Enabled${NC}"
-                        else
-                            print_kv_row "High-Delay Mode" "Disabled"
-                        fi
-                        ;;
-                    lotserver_hd_thresh_us)
-                        print_kv_row "HD Threshold" "${value}us"
-                        ;;
-                    lotserver_hd_ref_us)
-                        print_kv_row "HD Reference RTT" "${value}us"
-                        ;;
-                    lotserver_hd_gamma_boost)
-                        print_kv_row "HD Gamma Boost" "${value}%"
-                        ;;
-                    lotserver_hd_alpha_boost)
-                        print_kv_row "HD Alpha Boost" "$value packets"
-                        ;;
-                    lotserver_brave_enable)
-                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
-                            print_kv_row "Brave Mode" "${GREEN}Enabled${NC}"
-                        else
-                            print_kv_row "Brave Mode" "Disabled"
-                        fi
-                        ;;
-                    lotserver_brave_rtt_pct)
-                        print_kv_row "Brave RTT Tolerance" "${value}%"
-                        ;;
-                    lotserver_brave_hold_ms)
-                        print_kv_row "Brave Hold Time" "${value}ms"
-                        ;;
-                    lotserver_brave_floor_pct)
-                        print_kv_row "Brave Floor" "${value}%"
-                        ;;
-                    lotserver_brave_push_pct)
-                        print_kv_row "Brave Push" "${value}%"
-                        ;;
-                esac
-            fi
-        done
-    fi
-    print_box_bottom
-}
-
-apply_preset() {
-    PRESET=$2
-
-    # 模拟设置参数 (实际写入 sysfs)
-    set_val() {
-        echo $2 > /sys/module/lotspeed/parameters/$1 2>/dev/null
-    }
-
-    print_box_top
-    print_box_row "Applying Preset: $PRESET" "center"
-    print_box_div
-
-    case $PRESET in
-        conservative)
-            set_val lotserver_rate 125000000
-            set_val lotserver_min_cwnd 16
-            set_val lotserver_max_cwnd 15000
-            set_val lotserver_beta 717
-            set_val lotserver_turbo 0
-            set_val lotserver_safe_mode 1
-            set_val lotserver_fast_alpha 15
-            set_val lotserver_fast_gamma 40
-            set_val lotserver_fast_ss_exit 20
-            set_val lotserver_hd_enable 1
-            set_val lotserver_brave_enable 1
-            set_val lotserver_brave_rtt_pct 20
-            print_box_row "Applied: Conservative (1Gbps, Safe)" "left"
-            ;;
-        balanced)
-            set_val lotserver_rate 256000000
-            set_val lotserver_min_cwnd 16
-            set_val lotserver_max_cwnd 15000
-            set_val lotserver_beta 616
-            set_val lotserver_turbo 0
-            set_val lotserver_safe_mode 1
-            set_val lotserver_fast_alpha 20
-            set_val lotserver_fast_gamma 50
-            set_val lotserver_fast_ss_exit 25
-            set_val lotserver_hd_enable 1
-            set_val lotserver_brave_enable 1
-            set_val lotserver_brave_rtt_pct 25
-            print_box_row "Applied: Balanced (2.5Gbps, FAST)" "left"
-            ;;
-        aggressive)
-            set_val lotserver_rate 500000000
-            set_val lotserver_min_cwnd 16
-            set_val lotserver_max_cwnd 20000
-            set_val lotserver_beta 512
-            set_val lotserver_turbo 0
-            set_val lotserver_safe_mode 1
-            set_val lotserver_fast_alpha 30
-            set_val lotserver_fast_gamma 60
-            set_val lotserver_fast_ss_exit 30
-            set_val lotserver_hd_enable 1
-            set_val lotserver_hd_gamma_boost 30
-            set_val lotserver_brave_enable 1
-            set_val lotserver_brave_push_pct 12
-            print_box_row "Applied: Aggressive (4Gbps, High Push)" "left"
-            ;;
-        *)
-            print_box_row "Unknown preset: $PRESET" "left" "${RED}"
-            print_box_div
-            print_box_row "Available: conservative, balanced, aggressive" "left"
-            print_box_bottom
-            exit 1
-            ;;
-    esac
-    print_box_bottom
-}
-
-set_param() {
-    PARAM=$2
-    VALUE=$3
-    if [[ -z "$PARAM" ]] || [[ -z "$VALUE" ]]; then
-        print_box_top
-        print_box_row "Parameter Set Error" "center" "${RED}"
-        print_box_div
-        print_box_row "Usage: lotspeed set <parameter> <value>" "left"
-        print_box_row "Example: lotspeed set lotserver_rate 125000000" "left"
-        print_box_row "Example: lotspeed set lotserver_min_cwnd 16" "left"
-        print_box_row "Example: lotspeed set lotserver_max_cwnd 15000" "left"
-        print_box_row "Example: lotspeed set lotserver_beta 616" "left"
-        print_box_row "Example: lotspeed set lotserver_fast_alpha 20" "left"
-        print_box_row "Example: lotspeed set lotserver_fast_gamma 50" "left"
-        print_box_row "Example: lotspeed set lotserver_turbo 1/0" "left"
-        print_box_row "Example: lotspeed set lotserver_safe_mode 1/0" "left"
-        print_box_row "Example: lotspeed set lotserver_brave_enable 1/0" "left"
-        print_box_bottom
-        exit 1
-    fi
-
-    PARAM_FILE="/sys/module/lotspeed/parameters/$PARAM"
-    if [[ -f "$PARAM_FILE" ]]; then
-        echo $VALUE > $PARAM_FILE 2>/dev/null || {
-             echo -e "${RED}Error setting value${NC}"; exit 1;
-        }
-        print_box_top "${GREEN}"
-        print_box_row "Parameter Updated" "center" "${GREEN}"
-        print_box_div "${GREEN}"
-        print_kv_row "$PARAM" "$VALUE" "${GREEN}"
-        print_box_bottom "${GREEN}"
-    else
-        echo -e "${RED}Parameter not found${NC}"
-    fi
-}
-
+# ================= 主命令处理 =================
 case "$ACTION" in
     start)
         modprobe lotspeed 2>/dev/null || insmod $INSTALL_DIR/lotspeed.ko
+        sleep 1
         sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null
+        # 加载保存的配置
+        if [[ -f "$CONFIG_FILE" ]]; then
+            load_config
+        fi
         print_box_top "${GREEN}"
         print_box_row "LotSpeed Started" "center" "${GREEN}"
         print_box_bottom "${GREEN}"
@@ -698,7 +909,7 @@ case "$ACTION" in
         rmmod lotspeed 2>/dev/null
         print_box_top "${YELLOW}"
         print_box_row "LotSpeed Stopped" "center" "${YELLOW}"
-        print_kv_row "Current Algo" "$DEFAULT_ALGO" "${YELLOW}"
+        print_kv_row "Switched to" "$DEFAULT_ALGO" "${YELLOW}"
         print_box_bottom "${YELLOW}"
         ;;
     restart)
@@ -709,17 +920,29 @@ case "$ACTION" in
     status)
         show_status
         ;;
+    params|all)
+        show_all_params
+        ;;
     preset)
-        apply_preset $@
+        apply_preset "$2"
         ;;
     set)
-        set_param $@
+        set_single_param "$2" "$3"
+        ;;
+    save)
+        save_config
+        ;;
+    load)
+        load_config
+        ;;
+    edit)
+        edit_config
         ;;
     log|logs)
         print_box_top
-        print_box_row "Kernel Logs (Last 10)" "center"
+        print_box_row "Kernel Logs (Last 20)" "center"
         print_box_bottom
-        dmesg | grep -i lotspeed | tail -10
+        dmesg | grep -i lotspeed | tail -20
         ;;
     monitor)
         echo -e "${CYAN}Monitoring logs (Ctrl+C to stop)...${NC}"
@@ -730,66 +953,54 @@ case "$ACTION" in
         print_box_row "LotSpeed v$VERSION Uninstaller" "center" "${MAGENTA}"
         print_box_div "${MAGENTA}"
 
-        # 停止算法
         DEFAULT_ALGO=$(get_default_congestion_control)
         print_box_row "Switching to $DEFAULT_ALGO..." "left" "${MAGENTA}"
         sysctl -w net.ipv4.tcp_congestion_control=$DEFAULT_ALGO >/dev/null 2>&1
 
-        # 尝试卸载模块
         if rmmod lotspeed 2>/dev/null; then
             print_kv_row "Module Unload" "${GREEN}Success${NC}" "${MAGENTA}"
         else
             print_kv_row "Module Unload" "${YELLOW}In Use${NC}" "${MAGENTA}"
-            print_box_div "${MAGENTA}"
-            print_box_row "${YELLOW}Module is still loaded in memory ${NC}" "center" "${MAGENTA}"
-            print_box_row "${YELLOW}Active connections are preventing unload${NC}" "center" "${MAGENTA}"
-            print_box_row "${RED}Clean everything after reboot${NC}" "center" "${MAGENTA}"
-            print_box_div "${MAGENTA}"
+            print_box_row "${YELLOW}Reboot required for complete removal${NC}" "center" "${MAGENTA}"
         fi
 
-        # 删除文件
         print_box_row "Removing files..." "left" "${MAGENTA}"
         rm -rf $INSTALL_DIR
         rm -f /etc/modules-load.d/lotspeed.conf
         rm -f /lib/modules/$(uname -r)/kernel/net/ipv4/lotspeed.ko
+        rm -f $CONFIG_FILE
+        rm -f $SYSCTL_FILE
         depmod -a
         sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf
 
-        print_kv_row "Config Files" "${GREEN}Removed${NC}" "${MAGENTA}"
-        print_kv_row "Startup Scripts" "${GREEN}Removed${NC}" "${MAGENTA}"
-
-        # 最终检查 - 修复这里的对齐问题
-        print_box_div "${MAGENTA}"
-        if lsmod | grep -q lotspeed; then
-            # 内嵌的重启提示框
-            print_box_row "" "center" "${MAGENTA}"
-            print_box_row "${RED} ${NC}" "center" "${MAGENTA}"
-            print_box_row "${RED}REBOOT REQUIRED{NC}" "center" "${MAGENTA}"
-            print_box_row "${RED}Module will be completely removed${NC}" "center" "${MAGENTA}"
-            print_box_row "${RED}after system reboot.${NC}" "center" "${MAGENTA}"
-            print_box_row "" "center" "${MAGENTA}"
-        else
-            print_box_row "${GREEN}✅ LotSpeed Completely Uninstalled!${NC}" "center" "${MAGENTA}"
-        fi
+        print_kv_row "Files Removed" "${GREEN}Done${NC}" "${MAGENTA}"
         print_box_bottom "${MAGENTA}"
 
-        # 删除自己
         rm -f /usr/local/bin/lotspeed
         ;;
     *)
         print_box_top
         print_box_row "LotSpeed v$VERSION Management" "center"
+        print_box_row "BBR v3 + FAST TCP + Hybla Hybrid" "center"
         print_box_div
         print_kv_row "start" "Start LotSpeed"
         print_kv_row "stop" "Stop LotSpeed"
         print_kv_row "restart" "Restart LotSpeed"
-        print_kv_row "status" "Check Status"
-        print_kv_row "preset [name]" "Apply Preset"
-        print_kv_row "set [k] [v]" "Set Parameter"
-        print_kv_row "monitor" "Live Logs"
-        print_kv_row "uninstall" "Remove Completely"
+        print_kv_row "status" "Show status & key params"
+        print_kv_row "params" "Show all parameters"
         print_box_div
-        print_box_row "Presets: conservative, balanced, aggressive" "left"
+        print_kv_row "set <k> <v>" "Set parameter"
+        print_kv_row "preset <name>" "Apply preset config"
+        print_kv_row "save" "Save current config"
+        print_kv_row "load" "Load saved config"
+        print_kv_row "edit" "Edit config file"
+        print_box_div
+        print_kv_row "log" "Show kernel logs"
+        print_kv_row "monitor" "Live log monitoring"
+        print_kv_row "uninstall" "Remove completely"
+        print_box_div
+        print_box_row "Presets: conservative, balanced, aggressive," "left"
+        print_box_row "         highdelay, datacenter" "left"
         print_box_bottom
         exit 1
         ;;
@@ -800,23 +1011,29 @@ SCRIPT_EOF
     log_success "Management script created at /usr/local/bin/lotspeed"
 }
 
-print_kv_row() {
-    local key="$1"
-    local val="$2"
-    local color="${3:-$CYAN}"
+# ================= 创建 systemd 服务 =================
+create_systemd_service() {
+    log_info "Creating systemd service for config persistence..."
 
-    local key_width=$(get_width "$key")
-    local val_width=$(get_width "$val")
+    cat > /etc/systemd/system/lotspeed.service << 'EOF'
+[Unit]
+Description=LotSpeed v2.0 Congestion Control
+After=network.target
 
-    # 左右各1空格Padding + 中间
-    local available=$((BOX_WIDTH - 4))
-    local padding=$((available - key_width - val_width))
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/lotspeed start
+ExecStop=/usr/local/bin/lotspeed stop
 
-    [ $padding -lt 1 ] && padding=1
+[Install]
+WantedBy=multi-user.target
+EOF
 
-    echo -ne "${color}║${NC} $key"
-    repeat_char " " $padding
-    echo -e "$val ${color}║${NC}"
+    systemctl daemon-reload
+    systemctl enable lotspeed.service >/dev/null 2>&1
+
+    log_success "Systemd service created and enabled"
 }
 
 # ================= 结尾显示 =================
@@ -824,20 +1041,25 @@ show_info() {
     echo ""
     print_box_top "${GREEN}"
     print_box_row "LotSpeed v$VERSION Installation Complete!" "center" "${GREEN}"
-    print_box_row "ML-TCP Auto-Scaling Edition" "center" "${GREEN}"
+    print_box_row "BBR v3 + FAST TCP + Hybla Hybrid Edition" "center" "${GREEN}"
     print_box_bottom "${GREEN}"
 
     echo ""
-
-    # 调用新生成的脚本显示状态
     /usr/local/bin/lotspeed status
 
     echo ""
     print_box_top "${YELLOW}"
-    print_box_row "Recommended Settings" "center" "${YELLOW}"
+    print_box_row "Quick Start Guide" "center" "${YELLOW}"
     print_box_div "${YELLOW}"
-    print_kv_row "VPS/Cloud (<=1Gbps)" "lotspeed preset conservative" "${YELLOW}"
-    print_kv_row "VPS/Cloud (>1Gbps)" "lotspeed preset balanced" "${YELLOW}"
+    print_kv_row "Show status" "lotspeed status" "${YELLOW}"
+    print_kv_row "Show all params" "lotspeed params" "${YELLOW}"
+    print_kv_row "Set parameter" "lotspeed set fast_alpha 25" "${YELLOW}"
+    print_kv_row "Apply preset" "lotspeed preset balanced" "${YELLOW}"
+    print_kv_row "Save config" "lotspeed save" "${YELLOW}"
+    print_kv_row "Edit config" "lotspeed edit" "${YELLOW}"
+    print_box_div "${YELLOW}"
+    print_box_row "Config file: $CONFIG_FILE" "left" "${YELLOW}"
+    print_box_row "Sysctl path: /proc/sys/net/ipv4/lotspeed/" "left" "${YELLOW}"
     print_box_bottom "${YELLOW}"
     echo ""
 }
@@ -862,7 +1084,9 @@ main() {
     download_source || error_exit "Source download failed"
     compile_module || error_exit "Module compilation failed"
     load_module || error_exit "Module loading failed"
+    create_default_config || error_exit "Config creation failed"
     create_management_script || error_exit "Script creation failed"
+    create_systemd_service || error_exit "Systemd service creation failed"
 
     show_info
 

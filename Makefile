@@ -5,11 +5,8 @@ TAR             ?= tar
 obj-m           += lotspeed.o
 
 ccflags-y := -std=gnu99
-ifneq ($(shell printf '%s\n6.12.0\n$(KERNEL_RELEASE)' | sort -V | head -n1),6.12.0)
-ccflags-y += -DLOTSPEED_NEW_CONG_CONTROL_API
-endif
 
-.PHONY: all clean load unload
+.PHONY: all clean load unload v1
 .PHONY: .always-make
 
 all:

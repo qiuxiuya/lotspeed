@@ -1,23 +1,23 @@
-### lotspeed ml-tcp
+### lotspeed merge_bl
 
 <div align=center>
-    <img src="https://github.com/uk0/lotspeed/blob/ml-tcp/logo.png" width="400" height="400" />
+    <img src="https://github.com/uk0/lotspeed/blob/merge_bl/logo.png" width="400" height="400" />
 </div>
 
 
 
 ### branch explanation
 
-* `ml-tcp`: lotspeed ml-tcp 基于学习历史记录的模式进行加速，并且洲际场景抖动不会降速避让。
+* `merge_bl`: lotspeed merge_bl 基于学习历史记录的模式进行加速，并且洲际场景抖动不会降速避让,并且整合了BBRv3的优点。
 
 
 * auto install
 
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
 #   or
-wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
 ```
 
 
@@ -44,68 +44,115 @@ sysctl net.ipv4.tcp_congestion_control
 # 查看日志
 dmesg -w
 
+# 查看链接
+ss -nOi | grep lotspeed
+
+
+# 查看诊断信息
+ss -ti
+  #bbr_bw_lo: 当前带宽
+  #bbr_bw_hi: 最大带宽
+  #bbr_min_rtt: 最小 RTT
+  #bbr_pacing_gain: pacing 增益
+  #bbr_cwnd_gain: rho 系数 (高延迟指标)
+
 ```
 
 
 * helper （lotserver_beta越小强的越凶，建议大雨620否则会导致CPU飙高）
 
-```bash
+这是一个混合拥塞控制算法，整合了 BBR v3 + FAST TCP + Hybla 三种算法的优点。
 
-[cce ~]$ lotspeed status
-╔════════════════════════════════════════════════════════════════════╗
-║                   LotSpeed v5.6 Status (ML-TCP)                    ║
-╟────────────────────────────────────────────────────────────────────╢
-║ Module Status                                               Loaded ║
-║ Reference Count                                                  1 ║
-║ Active Connections                                              00 ║
-║ Active Algorithm                                          lotspeed ║
-╟────────────────────────────────────────────────────────────────────╢
-║                         Current Parameters                         ║
-╟────────────────────────────────────────────────────────────────────╢
-║ Global Rate Limit                          125.00 MB/s (1.00 Gbps) ║
-║ Min CWND                                                16 packets ║
-║ Max CWND                                             15000 packets ║
-║ Fairness (Beta)                                                60% ║
-║ Turbo Mode                                                Disabled ║
-║ Safe Mode                                                  Enabled ║
-║ FAST Alpha                                              20 packets ║
-║ FAST Gamma                                                     50% ║
-║ SS Exit Threshold                                              25% ║
-║ High-Delay Mode                                            Enabled ║
-║ HD Threshold                                              180000us ║
-║ HD Reference RTT                                           80000us ║
-║ HD Gamma Boost                                                 20% ║
-║ HD Alpha Boost                                          10 packets ║
-║ Brave Mode                                                 Enabled ║
-║ Brave RTT Tolerance                                            25% ║
-║ Brave Hold Time                                              400ms ║
-║ Brave Floor                                                    85% ║
-║ Brave Push                                                      8% ║
-╚════════════════════════════════════════════════════════════════════╝
-[cce ~]$ lotspeed help
-╔════════════════════════════════════════════════════════════════════╗
-║                      LotSpeed v5.6 Management                      ║
-╟────────────────────────────────────────────────────────────────────╢
-║ start                                               Start LotSpeed ║
-║ stop                                                 Stop LotSpeed ║
-║ restart                                           Restart LotSpeed ║
-║ status                                                Check Status ║
-║ preset [name]                                         Apply Preset ║
-║ set [k] [v]                                          Set Parameter ║
-║ monitor                                                  Live Logs ║
-║ uninstall                                        Remove Completely ║
-╟────────────────────────────────────────────────────────────────────╢
-║ Presets: conservative, balanced, aggressive                        ║
-╚════════════════════════════════════════════════════════════════════╝
+  ---
+核心架构
 
-```
+| 模块       | 来源     | 功能                                   |
+|------------|----------|----------------------------------------|
+| 带宽估计   | BBR v3   | delivered/interval 方式测量带宽        |
+| 延迟控制   | FAST TCP | alpha 目标队列长度                     |
+| 状态机     | BBR v3   | STARTUP → DRAIN → PROBE_BW → PROBE_RTT |
+| 高延迟补偿 | Hybla    | RTT² 补偿，让高延迟链路获得公平吞吐    |
+
+  ---
+主要功能
+
+1. BBR v3 状态机
+   STARTUP (快速启动) → DRAIN (排空队列) → PROBE_BW (稳态探测) → PROBE_RTT (探测最小RTT)
+   ↓
+   4个子阶段: CRUISE/REFILL/PROBE_UP/PROBE_DOWN
+
+2. FAST TCP 延迟控制
+- 目标队列长度 alpha (默认 20 包)
+- 平滑系数 gamma (默认 50%)
+- 公式: cwnd = (1-γ)×cwnd + γ×(base_rtt/rtt×cwnd + α)
+
+3. Hybla 高延迟优化
+- 当 RTT > 150ms 自动激活
+- rho = RTT / RTT_ref 补偿系数
+- cwnd 和 pacing 按 rho² 放大
+
+4. ECN 支持 (BBR v3 风格)
+- ecn_alpha EWMA 跟踪 ECN 标记率
+- 根据 ECN 信号调整 inflight_lo
+- STARTUP 阶段 ECN 过高时提前退出
+
+5. 勇敢模式 (抗抖动)
+- RTT 突增时冻结窗口/速率
+- 防止瞬时抖动导致吞吐下滑
+- 冻结期保持 85% 窗口下限
+
+6. 历史缓存
+- 按目标 IP 缓存 BW/RTT 信息
+- 重连时快速恢复到最佳状态
+- TTL 20 分钟，最多 8192 条目
+
+7. 快速路径优化
+- app-limited 且无拥塞信号时跳过模型更新
+- 减少 CPU 开销
+
+8. ACK 聚合补偿
+- 检测 ACK 聚合/延迟 ACK
+- 增加 extra_acked 余量防止 underflow
+
+  ---
+sysctl 可调参数 (/proc/sys/net/ipv4/lotspeed/)
+
+| 类别     | 参数           | 默认值 | 说明               |
+  |----------|----------------|--------|--------------------|
+| 基础     | min_cwnd       | 4      | 最小拥塞窗口       |
+|          | max_cwnd       | 15000  | 最大拥塞窗口       |
+|          | beta           | 717    | 丢包缩减 (~70%)    |
+| FAST     | fast_alpha     | 20     | 目标队列长度       |
+|          | fast_gamma     | 50     | 平滑系数 (%)       |
+| 高延迟   | hd_enable      | 1      | 启用高延迟优化     |
+|          | hd_thresh_us   | 150000 | 高延迟阈值 (150ms) |
+|          | hd_cwnd_gain   | 150    | 高延迟 cwnd 增益   |
+| 勇敢     | brave_enable   | 1      | 启用抗抖动         |
+|          | brave_hold_ms  | 300    | 冻结时间           |
+| ECN      | ecn_enable     | 1      | 启用 ECN           |
+|          | ecn_alpha_gain | 16     | EWMA 增益 (1/16)   |
+|          | ecn_thresh     | 50     | ECN 阈值 (%)       |
+| 快速路径 | fast_path      | 1      | 启用快速路径       |
+| 历史     | hist_enable    | 1      | 启用历史缓存       |
+|          | hist_ttl_sec   | 1200   | 缓存 TTL (20分钟)  |
+
+  ---
+适用场景
+
+- 高延迟链路 (跨国、卫星) - Hybla 补偿
+- 低延迟数据中心 - ECN + FAST 延迟控制
+- 不稳定网络 - 勇敢模式抗抖动
+- 短连接密集 - 历史缓存加速
+- 混合流量 - BBR v3 状态机公平性
+
+---
 
 
 ### test youtube
 
 
 <div align=center>
-    <img src="https://github.com/uk0/lotspeed/blob/ml-tcp/zeta-tcp.png" width="1024" height="768" />
+    <img src="https://github.com/uk0/lotspeed/blob/merge_bl/zeta-tcp.png" width="1024" height="768" />
 </div>
 
 
