@@ -213,8 +213,8 @@ download_source() {
     cd $INSTALL_DIR
 
     # 下载 v2.0 源代码
-    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed_v2.c" -o lotspeed.c || {
-        log_error "Failed to download lotspeed_v2.c"
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c || {
+        log_error "Failed to download lotspeed.c"
         exit 1
     }
 
