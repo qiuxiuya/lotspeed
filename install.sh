@@ -1185,16 +1185,73 @@ case "$1" in
         print_box_row "Uninstalling LotSpeed + NeoQ" "center" "${RED}"
         print_box_div "${RED}"
 
-        # 移除 NeoQ qdiscs
+        # 1. 停止 autotune 守护进程
+        print_box_row "Stopping autotune daemon..." "left" "${RED}"
+        if [[ -f /var/run/lotspeed-autotune.pid ]]; then
+            kill $(cat /var/run/lotspeed-autotune.pid) 2>/dev/null || true
+            rm -f /var/run/lotspeed-autotune.pid
+        fi
+        pkill -f "lotspeed-autotune" 2>/dev/null || true
+
+        # 2. 停止并禁用 systemd 服务
+        print_box_row "Stopping systemd service..." "left" "${RED}"
+        systemctl stop lotspeed.service 2>/dev/null || true
+        systemctl disable lotspeed.service 2>/dev/null || true
+
+        # 3. 切换到默认拥塞控制算法
+        local default_cc=$(get_default_cc)
+        print_box_row "Switching to $default_cc..." "left" "${RED}"
+        sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+
+        # 4. 移除 NeoQ qdiscs
+        print_box_row "Removing NeoQ qdiscs..." "left" "${RED}"
         for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
             tc qdisc del dev $iface root 2>/dev/null || true
         done
 
-        # 卸载模块
-        safe_unload "sch_neoq" "" 2>/dev/null || true
-        safe_unload "lotspeed" "lotspeed" 2>/dev/null || true
+        # 5. 创建后台卸载脚本 (SSH 安全)
+        local unload_script="/tmp/lotspeed_unload_$$.sh"
+        cat > "$unload_script" << 'UNLOAD_EOF'
+#!/bin/bash
+# LotSpeed 后台卸载脚本 - SSH 安全
+sleep 2
 
-        # 清理文件
+# 关闭非 SSH 的 lotspeed 连接
+for conn in $(ss -tnp 2>/dev/null | grep "lotspeed" | grep -v ":22 " | grep -v ":22$" | awk '{print $5}'); do
+    ss -K dst "$conn" 2>/dev/null || true
+done
+sleep 1
+
+# 卸载 NeoQ 模块
+retry=0
+while lsmod | grep -q "^sch_neoq " && [ $retry -lt 5 ]; do
+    rmmod sch_neoq 2>/dev/null && break
+    ((retry++))
+    sleep 2
+done
+
+# 卸载 LotSpeed 模块
+retry=0
+while lsmod | grep -q "^lotspeed " && [ $retry -lt 10 ]; do
+    rmmod lotspeed 2>/dev/null && break
+    ((retry++))
+    sleep 2
+done
+
+# 强制卸载 (如果仍然失败)
+lsmod | grep -q "^lotspeed " && rmmod -f lotspeed 2>/dev/null || true
+lsmod | grep -q "^sch_neoq " && rmmod -f sch_neoq 2>/dev/null || true
+
+# 清理自身
+rm -f "$0"
+UNLOAD_EOF
+        chmod +x "$unload_script"
+
+        print_box_row "Starting background unload..." "left" "${RED}"
+        nohup "$unload_script" >/dev/null 2>&1 &
+
+        # 6. 清理文件
+        print_box_row "Cleaning up files..." "left" "${RED}"
         rm -rf $INSTALL_DIR
         rm -f /etc/modules-load.d/lotspeed.conf
         rm -f /etc/modules-load.d/sch_neoq.conf
@@ -1203,10 +1260,16 @@ case "$1" in
         rm -f $CONFIG_FILE
         rm -f /etc/sysctl.d/99-lotspeed.conf
         rm -f /etc/systemd/system/lotspeed.service
+        rm -f /var/log/lotspeed-autotune.log
+        rm -f /tmp/lotspeed-autotune.*
         depmod -a
+        systemctl daemon-reload 2>/dev/null || true
         sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf 2>/dev/null || true
 
-        print_kv_row "Status" "${GREEN}Uninstalled${NC}" "${RED}"
+        print_box_div "${RED}"
+        print_box_row "${GREEN}Uninstall initiated${NC}" "center" "${RED}"
+        print_box_row "Modules unloading in background..." "center" "${RED}"
+        print_box_row "SSH connection preserved" "center" "${RED}"
         print_box_bottom "${RED}"
 
         rm -f /usr/local/bin/lotspeed
@@ -1431,21 +1494,70 @@ MF
         4)
             echo ""
             check_root
-            /usr/local/bin/lotspeed uninstall 2>/dev/null || {
-                # 手动卸载
+
+            # 如果管理脚本存在，使用它卸载
+            if [[ -x /usr/local/bin/lotspeed ]]; then
+                /usr/local/bin/lotspeed uninstall
+            else
+                # 手动卸载 (SSH 安全版本)
+                log_info "Manual uninstall (management script not found)..."
+
+                # 停止 autotune
+                pkill -f "lotspeed-autotune" 2>/dev/null || true
+                rm -f /var/run/lotspeed-autotune.pid
+
+                # 停止 systemd 服务
+                systemctl stop lotspeed.service 2>/dev/null || true
+                systemctl disable lotspeed.service 2>/dev/null || true
+
+                # 切换算法
+                local default_cc=$(get_default_cc)
+                log_info "Switching to $default_cc..."
+                sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+
+                # 移除 NeoQ qdiscs
                 for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
                     tc qdisc del dev $iface root 2>/dev/null || true
                 done
-                local default_cc=$(get_default_cc)
-                sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
-                rmmod sch_neoq 2>/dev/null || true
-                rmmod lotspeed 2>/dev/null || true
+
+                # 创建后台卸载脚本
+                local unload_script="/tmp/lotspeed_unload_$$.sh"
+                cat > "$unload_script" << 'UNLOAD_MANUAL_EOF'
+#!/bin/bash
+sleep 2
+# 关闭非 SSH 连接
+for conn in $(ss -tnp 2>/dev/null | grep "lotspeed" | grep -v ":22" | awk '{print $5}'); do
+    ss -K dst "$conn" 2>/dev/null || true
+done
+sleep 1
+# 卸载模块
+for i in {1..10}; do
+    rmmod sch_neoq 2>/dev/null
+    rmmod lotspeed 2>/dev/null
+    lsmod | grep -q "lotspeed\|sch_neoq" || break
+    sleep 2
+done
+rmmod -f lotspeed 2>/dev/null || true
+rmmod -f sch_neoq 2>/dev/null || true
+rm -f "$0"
+UNLOAD_MANUAL_EOF
+                chmod +x "$unload_script"
+                nohup "$unload_script" >/dev/null 2>&1 &
+
+                # 清理文件
                 rm -rf $INSTALL_DIR
                 rm -f /usr/local/bin/lotspeed
                 rm -f /etc/systemd/system/lotspeed.service
+                rm -f /etc/sysctl.d/99-lotspeed.conf
+                rm -f /etc/modules-load.d/lotspeed.conf
+                rm -f /etc/modules-load.d/sch_neoq.conf
+                rm -f $CONFIG_FILE
+                rm -f /var/log/lotspeed-autotune.log
+                rm -f /tmp/lotspeed-autotune.*
                 systemctl daemon-reload 2>/dev/null || true
-            }
-            log_success "Uninstalled!"
+                depmod -a 2>/dev/null || true
+            fi
+            log_success "Uninstall initiated! Modules unloading in background."
             ;;
         5)
             echo ""
