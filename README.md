@@ -1,4 +1,4 @@
-### lotspeed merge_bl (beta)
+### lotspeed merge_bl (⚠️实验性分支，谨慎使用)
 
 
 * 前置条件 `kernel 6.18.2 or later`
