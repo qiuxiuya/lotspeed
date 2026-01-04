@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# LotSpeed v2.0 + NeoQ v3.0 - Complete Network Optimization Suite
+# LotSpeed v2.2 + NeoQ v3.1 - Complete Network Optimization Suite
 # Author: uk0 @ 2025
 # GitHub: https://github.com/uk0/lotspeed
 #
@@ -15,7 +15,7 @@ set -e
 GITHUB_REPO="uk0/lotspeed"
 GITHUB_BRANCH="merge_bl"
 INSTALL_DIR="/opt/lotspeed"
-VERSION="2.0"
+VERSION="2.2"
 CONFIG_FILE="/etc/lotspeed.conf"
 SYSCTL_FILE="/etc/sysctl.d/99-lotspeed.conf"
 CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S')
@@ -127,7 +127,7 @@ print_banner() {
 ║     |_____\___/ \__|____/| .__/ \___|\___|\___|                      ║
 ║                          |_|                                         ║
 ║                                                                      ║
-║        LotSpeed v2.0 + NeoQ v3.0 Network Optimization Suite          ║
+║        LotSpeed v2.2 + NeoQ v3.1 Network Optimization Suite          ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 BANNER
@@ -211,6 +211,12 @@ download_source() {
         log_error "Failed to download qdisc_newneo.c"
         exit 1
     }
+
+    # 下载 Auto-Tune 脚本
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed-autotune.sh" -o lotspeed-autotune.sh || {
+        log_warn "Failed to download lotspeed-autotune.sh (optional)"
+    }
+    chmod +x lotspeed-autotune.sh 2>/dev/null || true
 
     # 创建 Makefile
     cat > Makefile << 'MAKEFILE'
@@ -510,7 +516,7 @@ safe_unload() {
 # 显示状态
 show_status() {
     print_box_top
-    print_box_row "LotSpeed + NeoQ Status" "center"
+    print_box_row "LotSpeed v2.2 + NeoQ v3.1 Status" "center"
     print_box_div
 
     # 当前算法
@@ -559,7 +565,7 @@ interactive_menu() {
     while true; do
         clear
         print_box_top "${MAGENTA}"
-        print_box_row "LotSpeed + NeoQ Management" "center" "${MAGENTA}"
+        print_box_row "LotSpeed v2.2 + NeoQ v3.1 Management" "center" "${MAGENTA}"
         print_box_div "${MAGENTA}"
 
         local current=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
@@ -891,6 +897,14 @@ apply_preset() {
             set_param brave_enable 1
             set_param ecn_enable 1
             set_param fast_path 1
+            # RACK-TLP
+            set_param rack_enable 1
+            set_param rack_reord_thresh 4
+            set_param tlp_enable 1
+            set_param tlp_timeout_div 2
+            # Hybla
+            set_param hybla_gain_exp 120
+            set_param hybla_rtt_floor 25000
             print_box_row "Conservative: Low aggression, high fairness" "left"
             ;;
         balanced)
@@ -904,6 +918,16 @@ apply_preset() {
             set_param brave_enable 1
             set_param ecn_enable 1
             set_param fast_path 1
+            # RACK-TLP
+            set_param rack_enable 1
+            set_param rack_reord_thresh 4
+            set_param rack_min_rtt_div 8
+            set_param tlp_enable 1
+            set_param tlp_timeout_div 2
+            set_param tlp_max_probes 2
+            # Hybla
+            set_param hybla_gain_exp 150
+            set_param hybla_rtt_floor 20000
             print_box_row "Balanced: Default settings" "left"
             ;;
         aggressive)
@@ -919,6 +943,15 @@ apply_preset() {
             set_param brave_floor_pct 90
             set_param ecn_enable 1
             set_param fast_path 1
+            # RACK-TLP
+            set_param rack_enable 1
+            set_param rack_reord_thresh 3
+            set_param tlp_enable 1
+            set_param tlp_timeout_div 2
+            set_param tlp_max_probes 3
+            # Hybla
+            set_param hybla_gain_exp 180
+            set_param hybla_rtt_floor 15000
             print_box_row "Aggressive: High throughput, more queue" "left"
             ;;
         highdelay)
@@ -937,6 +970,16 @@ apply_preset() {
             set_param brave_hold_ms 500
             set_param ecn_enable 0
             set_param fast_path 1
+            # RACK-TLP
+            set_param rack_enable 1
+            set_param rack_reord_thresh 6
+            set_param rack_min_rtt_div 10
+            set_param tlp_enable 1
+            set_param tlp_timeout_div 2
+            set_param tlp_max_probes 2
+            # Hybla
+            set_param hybla_gain_exp 150
+            set_param hybla_rtt_floor 15000
             print_box_row "High-Delay: Satellite/intercontinental" "left"
             ;;
         datacenter)
@@ -951,6 +994,16 @@ apply_preset() {
             set_param ecn_factor 90
             set_param ecn_max_rtt_us 10000
             set_param fast_path 1
+            # RACK-TLP
+            set_param rack_enable 1
+            set_param rack_reord_thresh 2
+            set_param rack_min_rtt_div 4
+            set_param tlp_enable 1
+            set_param tlp_timeout_div 2
+            set_param tlp_max_probes 3
+            # Hybla (disabled for datacenter)
+            set_param hybla_gain_exp 100
+            set_param hybla_rtt_floor 50000
             print_box_row "Datacenter: Low latency, ECN-focused" "left"
             ;;
         *)
@@ -998,7 +1051,7 @@ edit_config() {
 # 创建默认配置
 create_default_config() {
     cat > $CONFIG_FILE << 'DEFCONF'
-# LotSpeed v2.0 Configuration File
+# LotSpeed v2.2 Configuration File
 # BBR v3 + FAST TCP + Hybla Hybrid Edition
 
 # ============== 基础参数 ==============
@@ -1039,6 +1092,18 @@ startup_gain = 300
 
 # ============== 快速路径 ==============
 fast_path = 1
+
+# ============== RACK-TLP 快速丢包检测 ==============
+rack_enable = 1
+rack_reord_thresh = 4
+rack_min_rtt_div = 8
+tlp_enable = 1
+tlp_timeout_div = 2
+tlp_max_probes = 2
+
+# ============== Hybla 增强 ==============
+hybla_gain_exp = 150
+hybla_rtt_floor = 20000
 DEFCONF
     echo -e "${GREEN}Default config created at $CONFIG_FILE${NC}"
 }
@@ -1148,7 +1213,7 @@ case "$1" in
         ;;
     help|--help|-h)
         print_box_top
-        print_box_row "LotSpeed + NeoQ Commands" "center"
+        print_box_row "LotSpeed v2.2 + NeoQ v3.1 Commands" "center"
         print_box_div
         print_box_row "${BOLD}Basic Commands${NC}" "left"
         print_kv_row "lotspeed" "Interactive menu"
@@ -1223,7 +1288,7 @@ show_completion() {
     echo ""
     print_box_top "${GREEN}"
     print_box_row "Installation Complete!" "center" "${GREEN}"
-    print_box_row "LotSpeed v2.0 + NeoQ v3.0" "center" "${GREEN}"
+    print_box_row "LotSpeed v2.2 + NeoQ v3.1" "center" "${GREEN}"
     print_box_bottom "${GREEN}"
 
     echo ""
@@ -1237,6 +1302,10 @@ show_completion() {
     print_kv_row "Show Status" "lotspeed status" "${CYAN}"
     print_kv_row "NeoQ Stats" "cat /proc/net/neoq" "${CYAN}"
     print_box_div "${CYAN}"
+    print_box_row "Auto-Tune (Network Optimization)" "center" "${CYAN}"
+    print_kv_row "Analyze Network" "$INSTALL_DIR/lotspeed-autotune.sh" "${CYAN}"
+    print_kv_row "Start Daemon" "$INSTALL_DIR/lotspeed-autotune.sh daemon" "${CYAN}"
+    print_box_div "${CYAN}"
     print_box_row "Run 'lotspeed' for interactive menu" "center" "${CYAN}"
     print_box_bottom "${CYAN}"
     echo ""
@@ -1245,6 +1314,28 @@ show_completion() {
 # ================= 交互式安装菜单 =================
 
 interactive_install() {
+    # 检测是否通过 curl|bash 运行 (stdin 不是终端)
+    if [[ ! -t 0 ]]; then
+        log_info "Detected pipe input (curl|bash), running full auto-install..."
+        # 重新打开 /dev/tty 用于交互
+        exec < /dev/tty 2>/dev/null || {
+            # 如果无法打开 tty，自动执行完整安装
+            print_banner
+            check_root
+            check_system
+            install_dependencies
+            download_source
+            compile_modules
+            install_modules
+            create_management_script
+            create_systemd_service
+            insmod $INSTALL_DIR/lotspeed.ko 2>/dev/null || true
+            insmod $INSTALL_DIR/sch_neoq.ko 2>/dev/null || true
+            show_completion
+            return 0
+        }
+    fi
+
     clear
     print_banner
 

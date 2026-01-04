@@ -19,6 +19,7 @@
 
 
 ```bash
+# 1. install lotspeed module and helper script
 curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
 #   or
 wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
@@ -45,6 +46,22 @@ lotspeed save
 lotspeed preset highdelay
 lotspeed save
 
+
+# 2. cpy autotune script(manual)
+sudo cp lotspeed-autotune.sh /opt/lotspeed/lotspeed-autotune.sh
+sudo chmod +x /opt/lotspeed/lotspeed-autotune.sh
+
+# 3. Start the daemon
+sudo /opt/lotspeed/lotspeed-autotune.sh daemon
+
+# 4. Verify it's running
+sudo /opt/lotspeed/lotspeed-autotune.sh status
+
+# 5. Check process
+ps aux | grep lotspeed
+
+# 6. Watch logs
+tail -f /var/log/lotspeed-autotune.log
 
 
 ```

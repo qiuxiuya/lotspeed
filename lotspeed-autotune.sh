@@ -403,35 +403,59 @@ update_history() {
     done
 }
 
-# 计算历史平均
+# 计算历史平均 (兼容性版本)
 get_history_avg() {
-    local -n arr=$1
-    local sum=0 count=0
-    for val in "${arr[@]}"; do
-        sum=$((sum + val))
-        ((count++))
-    done
+    local arr_name=$1
+    local sum=0 count=0 val
+
+    case "$arr_name" in
+        RTT_HISTORY)
+            for val in "${RTT_HISTORY[@]}"; do
+                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); ((count++)); }
+            done
+            ;;
+        LOSS_HISTORY)
+            for val in "${LOSS_HISTORY[@]}"; do
+                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); ((count++)); }
+            done
+            ;;
+        RETRANS_HISTORY)
+            for val in "${RETRANS_HISTORY[@]}"; do
+                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); ((count++)); }
+            done
+            ;;
+    esac
+
     [[ $count -gt 0 ]] && echo $((sum / count)) || echo 0
 }
 
-# 计算历史趋势 (正=上升, 负=下降)
+# 计算历史趋势 (正=上升, 负=下降) - 兼容性版本
 get_history_trend() {
-    local -n arr=$1
-    local len=${#arr[@]}
-    [[ $len -lt 3 ]] && echo 0 && return
+    local arr_name=$1
+    local len=0 first_half=0 second_half=0 mid=0 i=0
+    local -a arr=()
 
-    local first_half=0 second_half=0
-    local mid=$((len / 2))
+    case "$arr_name" in
+        RTT_HISTORY) arr=("${RTT_HISTORY[@]}") ;;
+        LOSS_HISTORY) arr=("${LOSS_HISTORY[@]}") ;;
+        RETRANS_HISTORY) arr=("${RETRANS_HISTORY[@]}") ;;
+    esac
+
+    len=${#arr[@]}
+    [[ $len -lt 3 ]] && { echo 0; return; }
+
+    mid=$((len / 2))
 
     for ((i=0; i<mid; i++)); do
-        first_half=$((first_half + arr[i]))
+        [[ -n "${arr[i]}" && "${arr[i]}" =~ ^[0-9]+$ ]] && first_half=$((first_half + arr[i]))
     done
     for ((i=mid; i<len; i++)); do
-        second_half=$((second_half + arr[i]))
+        [[ -n "${arr[i]}" && "${arr[i]}" =~ ^[0-9]+$ ]] && second_half=$((second_half + arr[i]))
     done
 
-    first_half=$((first_half / mid))
-    second_half=$((second_half / (len - mid)))
+    [[ $mid -gt 0 ]] && first_half=$((first_half / mid)) || first_half=0
+    local second_count=$((len - mid))
+    [[ $second_count -gt 0 ]] && second_half=$((second_half / second_count)) || second_half=0
 
     echo $((second_half - first_half))
 }
@@ -441,16 +465,16 @@ get_history_trend() {
 # ============================================================================
 
 detect_network_type() {
-    local rtt=${METRICS[rtt_avg]}
-    local jitter=${METRICS[rtt_jitter]}
-    local rtt_cv=${METRICS[rtt_cv]}
-    local drop_rate=${METRICS[drop_rate_permille]}
-    local ecn_rate=${METRICS[ecn_rate_permille]}
-    local retrans=${METRICS[retrans_total]}
+    local rtt=${METRICS[rtt_avg]:-0}
+    local jitter=${METRICS[rtt_jitter]:-0}
+    local rtt_cv=${METRICS[rtt_cv]:-0}
+    local drop_rate=${METRICS[drop_rate_permille]:-0}
+    local ecn_rate=${METRICS[ecn_rate_permille]:-0}
+    local retrans=${METRICS[retrans_total]:-0}
 
     # 使用历史数据平滑判断
-    local rtt_trend=$(get_history_trend RTT_HISTORY)
-    local loss_trend=$(get_history_trend LOSS_HISTORY)
+    local rtt_trend=$(get_history_trend RTT_HISTORY) || rtt_trend=0
+    local loss_trend=$(get_history_trend LOSS_HISTORY) || loss_trend=0
 
     local network_type="normal"
     local confidence=50
@@ -949,32 +973,33 @@ fine_tune() {
     local network_type="$1"
 
     # 1. ECN 标记率高 -> 降低阈值
-    if [[ ${METRICS[ecn_rate_permille]} -gt 50 ]]; then
+    if [[ ${METRICS[ecn_rate_permille]:-0} -gt 50 ]]; then
         local cur=$(get_param "ecn_thresh")
-        if [[ $cur -gt 15 ]]; then
+        if [[ ${cur:-0} -gt 15 ]]; then
             local new=$((cur - 5))
             set_param "ecn_thresh" $new
-            log ADJUST "ECN rate high (${METRICS[ecn_rate_permille]}‰), ecn_thresh: $cur -> $new"
+            log ADJUST "ECN rate high (${METRICS[ecn_rate_permille]:-0}‰), ecn_thresh: $cur -> $new"
         fi
     fi
 
     # 2. 抖动突然增大 -> 增加 brave_hold_ms
-    if [[ ${METRICS[rtt_jitter]} -gt 30 ]]; then
+    if [[ ${METRICS[rtt_jitter]:-0} -gt 30 ]]; then
         local cur=$(get_param "brave_hold_ms")
-        local target=$((METRICS[rtt_jitter] * 10))
+        local jitter=${METRICS[rtt_jitter]:-0}
+        local target=$((jitter * 10))
         target=$((target > 800 ? 800 : target))
-        if [[ $target -gt $cur ]]; then
+        if [[ $target -gt ${cur:-0} ]]; then
             set_param "brave_hold_ms" $target
             set_param "brave_enable" 1
-            log ADJUST "High jitter (${METRICS[rtt_jitter]}ms), brave_hold_ms: $cur -> $target"
+            log ADJUST "High jitter (${jitter}ms), brave_hold_ms: ${cur:-0} -> $target"
         fi
     fi
 
     # 3. RTT 持续上升 -> 降低 fast_alpha
-    local rtt_trend=$(get_history_trend RTT_HISTORY)
-    if [[ $rtt_trend -gt 30 ]]; then
+    local rtt_trend=$(get_history_trend RTT_HISTORY) || rtt_trend=0
+    if [[ ${rtt_trend:-0} -gt 30 ]]; then
         local cur=$(get_param "fast_alpha")
-        if [[ $cur -gt 10 ]]; then
+        if [[ ${cur:-0} -gt 10 ]]; then
             local new=$((cur - 5))
             set_param "fast_alpha" $new
             log ADJUST "RTT trending up (+${rtt_trend}), fast_alpha: $cur -> $new"
@@ -982,10 +1007,10 @@ fine_tune() {
     fi
 
     # 4. 丢包率上升 -> 降低 max_cwnd
-    local loss_trend=$(get_history_trend LOSS_HISTORY)
-    if [[ $loss_trend -gt 10 ]]; then
+    local loss_trend=$(get_history_trend LOSS_HISTORY) || loss_trend=0
+    if [[ ${loss_trend:-0} -gt 10 ]]; then
         local cur=$(get_param "max_cwnd")
-        if [[ $cur -gt 5000 ]]; then
+        if [[ ${cur:-0} -gt 5000 ]]; then
             local new=$((cur * 9 / 10))
             set_param "max_cwnd" $new
             log ADJUST "Loss trending up (+${loss_trend}), max_cwnd: $cur -> $new"
@@ -993,10 +1018,10 @@ fine_tune() {
     fi
 
     # 5. 网络稳定且 cwnd 使用率低 -> 可以提高 max_cwnd
-    if [[ ${METRICS[rtt_cv]} -lt 20 && ${METRICS[drop_rate_permille]} -eq 0 ]]; then
+    if [[ ${METRICS[rtt_cv]:-100} -lt 20 && ${METRICS[drop_rate_permille]:-0} -eq 0 ]]; then
         local cur_max=$(get_param "max_cwnd")
-        local avg_cwnd=${METRICS[cwnd_avg]}
-        if [[ $avg_cwnd -gt 0 && $((avg_cwnd * 2)) -gt $cur_max && $cur_max -lt 20000 ]]; then
+        local avg_cwnd=${METRICS[cwnd_avg]:-0}
+        if [[ ${avg_cwnd:-0} -gt 0 && $((avg_cwnd * 2)) -gt ${cur_max:-0} && ${cur_max:-0} -lt 20000 ]]; then
             local new=$((cur_max + 1000))
             [[ $new -gt 25000 ]] && new=25000
             set_param "max_cwnd" $new
@@ -1027,10 +1052,10 @@ do_adjust() {
 
     # 模式变化 -> 应用预设
     if [[ "$network_type" != "$CURRENT_MODE" ]]; then
-        log INFO "Network type changed: $CURRENT_MODE -> $network_type (confidence: ${METRICS[confidence]}%)"
+        log INFO "Network type changed: $CURRENT_MODE -> $network_type (confidence: ${METRICS[confidence]:-0}%)"
 
         # 只有置信度 > 60% 才切换
-        if [[ ${METRICS[confidence]} -ge 60 ]]; then
+        if [[ ${METRICS[confidence]:-0} -ge 60 ]]; then
             apply_preset "$network_type"
             CURRENT_MODE="$network_type"
             LAST_ADJUST_TIME=$now
@@ -1039,15 +1064,15 @@ do_adjust() {
             cat > "$STATE_FILE" << EOF
 mode=$CURRENT_MODE
 last_adjust=$LAST_ADJUST_TIME
-rtt_avg=${METRICS[rtt_avg]}
-rtt_jitter=${METRICS[rtt_jitter]}
-drop_rate=${METRICS[drop_rate_permille]}
-ecn_rate=${METRICS[ecn_rate_permille]}
-confidence=${METRICS[confidence]}
-reason=${METRICS[detection_reason]}
+rtt_avg=${METRICS[rtt_avg]:-0}
+rtt_jitter=${METRICS[rtt_jitter]:-0}
+drop_rate=${METRICS[drop_rate_permille]:-0}
+ecn_rate=${METRICS[ecn_rate_permille]:-0}
+confidence=${METRICS[confidence]:-0}
+reason=${METRICS[detection_reason]:-unknown}
 EOF
         else
-            log DEBUG "Low confidence (${METRICS[confidence]}%), keeping current mode"
+            log DEBUG "Low confidence (${METRICS[confidence]:-0}%), keeping current mode"
         fi
     else
         # 同模式下微调
@@ -1070,7 +1095,9 @@ show_status() {
         if kill -0 "$pid" 2>/dev/null; then
             echo -e "${CYAN}║${NC} Daemon: ${GREEN}Running${NC} (PID: $pid)"
         else
-            echo -e "${CYAN}║${NC} Daemon: ${RED}Stopped${NC} (stale PID)"
+            # 自动清理过期 PID 文件
+            rm -f "$PID_FILE"
+            echo -e "${CYAN}║${NC} Daemon: ${YELLOW}Not running${NC} (cleaned stale PID)"
         fi
     else
         echo -e "${CYAN}║${NC} Daemon: ${YELLOW}Not running${NC}"
@@ -1157,15 +1184,46 @@ start_daemon() {
         exit 1
     fi
 
+    # 确保日志目录存在
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    touch "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/lotspeed-autotune.log"
+
     log INFO "Starting LotSpeed Auto-Tune daemon v2.1..."
 
-    nohup "$0" run >> "$LOG_FILE" 2>&1 &
-    local pid=$!
-    echo $pid > "$PID_FILE"
+    # 使用 setsid 创建新会话，确保进程完全脱离终端
+    if command -v setsid &>/dev/null; then
+        setsid "$0" run >> "$LOG_FILE" 2>&1 &
+    else
+        nohup "$0" run >> "$LOG_FILE" 2>&1 &
+        disown 2>/dev/null || true
+    fi
 
-    log INFO "Daemon started (PID: $pid)"
-    echo -e "${GREEN}Daemon started (PID: $pid)${NC}"
-    echo "Log: $LOG_FILE"
+    # 等待 PID 文件被子进程创建
+    local wait_count=0
+    while [[ ! -f "$PID_FILE" ]] && [[ $wait_count -lt 10 ]]; do
+        sleep 0.5
+        ((wait_count++))
+    done
+
+    if [[ -f "$PID_FILE" ]]; then
+        local pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            log INFO "Daemon started (PID: $pid)"
+            echo -e "${GREEN}Daemon started (PID: $pid)${NC}"
+            echo "Log: $LOG_FILE"
+        else
+            echo -e "${RED}Daemon process exited unexpectedly${NC}"
+            echo "Check log: $LOG_FILE"
+            tail -10 "$LOG_FILE" 2>/dev/null
+            rm -f "$PID_FILE"
+            exit 1
+        fi
+    else
+        echo -e "${RED}Failed to start daemon (timeout waiting for PID)${NC}"
+        echo "Check log: $LOG_FILE"
+        tail -10 "$LOG_FILE" 2>/dev/null
+        exit 1
+    fi
 }
 
 stop_daemon() {
@@ -1187,24 +1245,41 @@ stop_daemon() {
 }
 
 run_loop() {
-    log INFO "Auto-tune daemon started"
+    # 禁用 set -e，防止命令失败导致守护进程退出
+    set +e
+
+    # 设置信号处理，确保正常退出时清理 PID 文件
+    trap 'rm -f "$PID_FILE"; log INFO "Daemon stopped"; exit 0' SIGTERM SIGINT SIGHUP
+
+    # 写入 PID (run 模式下自己的 PID)
+    echo $$ > "$PID_FILE"
+
+    log INFO "Auto-tune daemon started (PID: $$)"
 
     if ! check_sysctl; then
         log ERROR "LotSpeed module not loaded"
+        rm -f "$PID_FILE"
         exit 1
     fi
 
     # 初始检测
-    collect_all_metrics
-    CURRENT_MODE=$(detect_network_type)
-    apply_preset "$CURRENT_MODE"
+    collect_all_metrics || true
+    CURRENT_MODE=$(detect_network_type) || CURRENT_MODE="normal"
+    apply_preset "$CURRENT_MODE" || true
     LAST_ADJUST_TIME=$(date +%s)
-    log INFO "Initial mode: $CURRENT_MODE (confidence: ${METRICS[confidence]}%)"
+    log INFO "Initial mode: $CURRENT_MODE (confidence: ${METRICS[confidence]:-0}%)"
 
     # 主循环
     while true; do
-        collect_all_metrics
-        do_adjust
+        # 检查 LotSpeed 模块是否仍然加载
+        if ! check_sysctl; then
+            log WARN "LotSpeed module unloaded, waiting..."
+            sleep $SAMPLE_INTERVAL
+            continue
+        fi
+
+        collect_all_metrics || true
+        do_adjust || true
         sleep $SAMPLE_INTERVAL
     done
 }
