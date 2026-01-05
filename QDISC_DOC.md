@@ -43,9 +43,3 @@ tc -s qdisc show dev eth0
    Base:     0 us
 ===============================================
 ```
-
-### 配置参数 (通过 tc)
-
-```
-sudo tc qdisc change dev eth0 root neoq limit 10240 flow_limit 100 quantum 1514 target 5000 ecn 1 http_boost 1
-```
