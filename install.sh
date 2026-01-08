@@ -175,6 +175,76 @@ check_system() {
     log_success "System: $OS $OS_VERSION (kernel $(uname -r), $ARCH)"
 }
 
+# ================= 检查旧模块是否已加载 =================
+
+check_old_modules_loaded() {
+    local lotspeed_loaded=0
+    local neoq_loaded=0
+    local lotspeed_ref=0
+    local neoq_ref=0
+
+    # 检查 lotspeed 模块
+    if lsmod | grep -q "^lotspeed "; then
+        lotspeed_loaded=1
+        lotspeed_ref=$(lsmod | grep "^lotspeed " | awk '{print $3}')
+    fi
+
+    # 检查 sch_neoq 模块
+    if lsmod | grep -q "^sch_neoq "; then
+        neoq_loaded=1
+        neoq_ref=$(lsmod | grep "^sch_neoq " | awk '{print $3}')
+    fi
+
+    # 如果任一模块已加载
+    if [[ $lotspeed_loaded -eq 1 ]] || [[ $neoq_loaded -eq 1 ]]; then
+        echo ""
+        print_box_top "${YELLOW}"
+        print_box_row "Warning: Old Kernel Modules Detected!" "center" "${YELLOW}"
+        print_box_div "${YELLOW}"
+
+        if [[ $lotspeed_loaded -eq 1 ]]; then
+            print_kv_row "lotspeed module" "Loaded (ref: $lotspeed_ref)" "${YELLOW}"
+        fi
+        if [[ $neoq_loaded -eq 1 ]]; then
+            print_kv_row "sch_neoq module" "Loaded (ref: $neoq_ref)" "${YELLOW}"
+        fi
+
+        print_box_div "${YELLOW}"
+        print_box_row "Old modules must be unloaded before reinstalling." "left" "${YELLOW}"
+        print_box_row "" "left" "${YELLOW}"
+        print_box_row "Please follow these steps:" "left" "${YELLOW}"
+        print_box_row "  1. Run: ${CYAN}lotspeed${NC}" "left" "${YELLOW}"
+        print_box_row "  2. Select option ${CYAN}7) Disable all${NC}" "left" "${YELLOW}"
+        print_box_row "  3. ${RED}Reboot${NC} the system" "left" "${YELLOW}"
+        print_box_row "  4. rmmod lotspeed and sch_neoq" "left" "${YELLOW}"
+        print_box_row "  5. Run this installer again" "left" "${YELLOW}"
+        print_box_div "${YELLOW}"
+
+        # 检查 lotspeed 命令是否存在
+        if [[ -x /usr/local/bin/lotspeed ]]; then
+            print_box_row "Or run directly:" "left" "${YELLOW}"
+            print_box_row "  ${CYAN}lotspeed stop && sudo reboot${NC}" "left" "${YELLOW}"
+            print_box_div "${YELLOW}"
+        fi
+
+        print_box_row "Continue anyway? (Not recommended)" "center" "${YELLOW}"
+        print_box_bottom "${YELLOW}"
+
+        echo ""
+        read -p "Continue installation with modules loaded? [y/N]: " answer
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            log_info "Installation aborted. Please unload modules and reboot first."
+            exit 0
+        fi
+
+        echo ""
+        log_warn "Proceeding with modules loaded. This may cause issues!"
+        log_warn "If installation fails, please reboot and try again."
+        echo ""
+        sleep 2
+    fi
+}
+
 install_dependencies() {
     log_info "Installing dependencies..."
 
@@ -1380,6 +1450,7 @@ interactive_install() {
             print_banner
             check_root
             check_system
+            check_old_modules_loaded
             install_dependencies
             download_source
             compile_modules
@@ -1395,6 +1466,9 @@ interactive_install() {
 
     clear
     print_banner
+
+    # 检查旧模块是否已加载
+    check_old_modules_loaded
 
     print_box_top "${MAGENTA}"
     print_box_row "Installation Options" "center" "${MAGENTA}"
@@ -1587,6 +1661,7 @@ main() {
         print_banner
         check_root
         check_system
+        check_old_modules_loaded
         install_dependencies
         download_source
         compile_modules
