@@ -566,7 +566,7 @@ interactive_menu() {
 
         print_box_row "  ${BOLD}Module Management${NC}" "left" "${MAGENTA}"
         print_kv_row "6)" "Load all modules" "${MAGENTA}"
-        print_kv_row "7)" "Unload all modules (safe)" "${MAGENTA}"
+        print_kv_row "7)" "Disable all (switch to default)" "${MAGENTA}"
         print_box_div "${MAGENTA}"
 
         print_box_row "  ${BOLD}Other${NC}" "left" "${MAGENTA}"
@@ -647,22 +647,24 @@ interactive_menu() {
                 ;;
             7)
                 echo ""
-                # 先禁用 NeoQ qdisc
-                echo -e "${YELLOW}Removing NeoQ qdiscs...${NC}"
+                # 切换到默认算法
+                local default_cc=$(get_default_cc)
+                echo -e "${YELLOW}Switching CC to $default_cc...${NC}"
+                sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+
+                # 还原 NeoQ qdisc 到默认
+                echo -e "${YELLOW}Restoring default qdisc...${NC}"
+                local default_qdisc=$(get_default_qdisc)
                 for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
+                    tc qdisc replace dev $iface root $default_qdisc 2>/dev/null || \
                     tc qdisc del dev $iface root 2>/dev/null || true
                 done
-                sleep 1
 
-                # 卸载 NeoQ
-                if lsmod | grep -q "^sch_neoq "; then
-                    safe_unload "sch_neoq" ""
-                fi
-
-                # 卸载 LotSpeed
-                if lsmod | grep -q "^lotspeed "; then
-                    safe_unload "lotspeed" "lotspeed"
-                fi
+                echo -e "${GREEN}Algorithm switched to $default_cc${NC}"
+                echo -e "${YELLOW}Kernel modules are still loaded in memory${NC}"
+                echo -e "${YELLOW}To fully unload, reboot then run:${NC}"
+                echo -e "${CYAN}  sudo rmmod lotspeed${NC}"
+                echo -e "${CYAN}  sudo rmmod sch_neoq${NC}"
                 read -p "Press Enter to continue..."
                 ;;
             8)
