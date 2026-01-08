@@ -1,7 +1,7 @@
 ### lotspeed merge_bl (⚠️实验性分支，谨慎使用)
 
 
-* 前置条件 `kernel 6.18.2 or later`
+* 前置条件 `kernel 6.18.2-bbrv3 or later`
 
 
 <div align=center>
@@ -14,6 +14,83 @@
 
 * kernel_version:
     - "6.18.2-bbrv3-patch" # LTS
+
+
+
+### lotspeed helper
+```
+
+root@dev-kernel:~# lotspeed help
+╔════════════════════════════════════════════════════════════════════╗
+║                 LotSpeed v2.2 + NeoQ v3.1 Commands                 ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Basic Commands                                                     ║
+║ lotspeed                                          Interactive menu ║
+║ lotspeed start                                  Enable LotSpeed CC ║
+║ lotspeed stop                                  Disable LotSpeed CC ║
+║ lotspeed restart                                  Restart LotSpeed ║
+║ lotspeed status                                    Show all status ║
+╟────────────────────────────────────────────────────────────────────╢
+║ NeoQ Qdisc                                                         ║
+║ lotspeed neoq-start [iface]                      Enable NeoQ qdisc ║
+║ lotspeed neoq-stop [iface]                      Disable NeoQ qdisc ║
+║ lotspeed neoq-stats                           Show NeoQ statistics ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Parameter Management                                               ║
+║ lotspeed params                                Show all parameters ║
+║ lotspeed set <k> <v>                          Set single parameter ║
+║ lotspeed preset <name>                         Apply preset config ║
+║ lotspeed save                                  Save current config ║
+║ lotspeed load                                    Load saved config ║
+║ lotspeed edit                                     Edit config file ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Other                                                              ║
+║ lotspeed log                                      Show kernel logs ║
+║ lotspeed monitor                               Live log monitoring ║
+║ lotspeed autotune                         Auto-tune network params ║
+║ lotspeed uninstall                               Remove everything ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Presets: conservative, balanced, aggressive,                       ║
+║          highdelay, datacenter                                     ║
+╚════════════════════════════════════════════════════════════════════╝
+
+
+root@dev-kernel:~# lotspeed autotune help
+LotSpeed Auto-Tune Daemon v2.1
+
+Commands:
+  (none)    Analyze network and suggest preset
+  status    Show current status and metrics
+  daemon    Start background daemon
+  stop      Stop background daemon
+  restart   Restart daemon
+  aggressive    Apply anti_loss preset immediately
+  ultra         Apply ultra_aggressive preset
+
+Presets (use with '<name>'):
+  normal        Balanced settings (default)
+  anti_loss     Aggressive loss recovery, fast retransmit
+  ultra_aggressive  Maximum throughput, large queues
+  loss_recovery Optimized for active loss conditions
+  datacenter    Ultra-low latency, ECN-focused
+  satellite     Very high delay (300+ ms)
+  highdelay     High delay WAN (100-300ms)
+  lossy         Moderate packet loss (1-5%)
+  lossy_severe  Severe packet loss (>5%)
+  jittery       High RTT variance (mobile/WiFi)
+  congested     High ECN marks
+
+Environment:
+  DEBUG=1   Enable debug output
+
+Files:
+  Log:    /var/log/lotspeed-autotune.log
+  PID:    /var/run/lotspeed-autotune.pid
+  State:  /tmp/lotspeed-autotune.state
+
+```
+
+
 
 ### branch explanation
 
@@ -29,47 +106,9 @@ curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/refs/heads/merge_bl/in
 #   or
 wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/refs/heads/merge_bl/install.sh | sudo bash
 
-
-# helper
-
-lotspeed status          # 查看状态
-lotspeed params          # 显示所有参数
-lotspeed set <k> <v>     # 设置参数
-lotspeed preset <name>   # 应用预设
-lotspeed save            # 保存当前配置
-lotspeed load            # 加载配置
-lotspeed edit            # 编辑配置文件
-
-# 调参
-lotspeed set fast_alpha 30
-lotspeed set hd_cwnd_gain 200
-  
-# 保存配置 (下次开机自动生效)
-lotspeed save
-
-# 或应用预设后保存
-lotspeed preset highdelay
-lotspeed save
-
-
-# 2. cpy autotune script(manual)
-sudo cp lotspeed-autotune.sh /opt/lotspeed/lotspeed-autotune.sh
-sudo chmod +x /opt/lotspeed/lotspeed-autotune.sh
-
-# 3. Start the daemon
-sudo /opt/lotspeed/lotspeed-autotune.sh daemon
-
-# 4. Verify it's running
-sudo /opt/lotspeed/lotspeed-autotune.sh status
-
-# 5. Check process
-ps aux | grep lotspeed
-
-# 6. Watch logs
-tail -f /var/log/lotspeed-autotune.log
-
-
 ```
+
+
 
 
 * manual compile and load
@@ -248,42 +287,6 @@ PAC (Proactive ACK Control) for TCP Incast Congestion
 
 [QDISC_DOC](QDISC_DOC.md)
 
-
-### lotspeed helper
-```
-root@dev-kernel:/home/lotspeed# lotspeed help
-╔════════════════════════════════════════════════════════════════════╗
-║                      LotSpeed + NeoQ Commands                      ║
-╟────────────────────────────────────────────────────────────────────╢
-║ Basic Commands                                                     ║
-║ lotspeed                                          Interactive menu ║
-║ lotspeed start                                  Enable LotSpeed CC ║
-║ lotspeed stop                                  Disable LotSpeed CC ║
-║ lotspeed restart                                  Restart LotSpeed ║
-║ lotspeed status                                    Show all status ║
-╟────────────────────────────────────────────────────────────────────╢
-║ NeoQ Qdisc                                                         ║
-║ lotspeed neoq-start [iface]                      Enable NeoQ qdisc ║
-║ lotspeed neoq-stop [iface]                      Disable NeoQ qdisc ║
-║ lotspeed neoq-stats                           Show NeoQ statistics ║
-╟────────────────────────────────────────────────────────────────────╢
-║ Parameter Management                                               ║
-║ lotspeed params                                Show all parameters ║
-║ lotspeed set <k> <v>                          Set single parameter ║
-║ lotspeed preset <name>                         Apply preset config ║
-║ lotspeed save                                  Save current config ║
-║ lotspeed load                                    Load saved config ║
-║ lotspeed edit                                     Edit config file ║
-╟────────────────────────────────────────────────────────────────────╢
-║ Other                                                              ║
-║ lotspeed log                                      Show kernel logs ║
-║ lotspeed monitor                               Live log monitoring ║
-║ lotspeed uninstall                               Remove everything ║
-╟────────────────────────────────────────────────────────────────────╢
-║ Presets: conservative, balanced, aggressive,                       ║
-║          highdelay, datacenter                                     ║
-╚════════════════════════════════════════════════════════════════════╝
-```
 
 
 -----------------------------------
