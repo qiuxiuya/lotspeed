@@ -47,6 +47,18 @@ CURRENT_MODE="unknown"
 declare -a RTT_HISTORY=()
 declare -a LOSS_HISTORY=()
 declare -a RETRANS_HISTORY=()
+declare -a TIMEOUT_HISTORY=()
+
+# 上一次采样的 SNMP 计数器 (用于计算增量)
+PREV_RETRANS_SEGS=0
+PREV_OUT_SEGS=0
+PREV_LOSS_EVENTS=0
+PREV_FAST_RETRANS=0
+PREV_TIMEOUTS=0
+
+# 激进模式配置
+AGGRESSIVE_MODE=0
+LOSS_RESPONSE_LEVEL=0  # 0=normal, 1=mild, 2=aggressive, 3=ultra
 
 # 颜色
 RED='\033[0;31m'
@@ -195,7 +207,7 @@ collect_ss_stats() {
             fi
         fi
 
-        ((conn_count++))
+        conn_count=$((conn_count + 1))
     done <<< "$ss_output"
 
     # 计算统计值
@@ -267,6 +279,9 @@ collect_netstat_stats() {
         METRICS[tcp_fast_retrans]=0
         METRICS[tcp_timeouts]=0
         METRICS[tcp_ecn_marks]=0
+        METRICS[tcp_sack_recovery]=0
+        METRICS[tcp_loss_probes]=0
+        METRICS[tcp_loss_probe_recovery]=0
         return
     fi
 
@@ -275,6 +290,7 @@ collect_netstat_stats() {
 
     # 查找字段位置
     local loss_idx=0 fast_idx=0 timeout_idx=0 ecn_idx=0
+    local sack_idx=0 probe_idx=0 probe_recv_idx=0
     local idx=1
     for key in $tcpext_keys; do
         case "$key" in
@@ -282,6 +298,9 @@ collect_netstat_stats() {
             TCPFastRetrans) fast_idx=$idx ;;
             TCPTimeouts) timeout_idx=$idx ;;
             TCPECNFallback|TCPECERecv) ecn_idx=$idx ;;
+            TCPSackRecovery) sack_idx=$idx ;;
+            TCPLossProbes) probe_idx=$idx ;;
+            TCPLossProbeRecovery) probe_recv_idx=$idx ;;
         esac
         ((idx++))
     done
@@ -290,12 +309,18 @@ collect_netstat_stats() {
     METRICS[tcp_fast_retrans]=$(echo "$tcpext_vals" | awk "{print \$$fast_idx}" 2>/dev/null || echo "0")
     METRICS[tcp_timeouts]=$(echo "$tcpext_vals" | awk "{print \$$timeout_idx}" 2>/dev/null || echo "0")
     METRICS[tcp_ecn_marks]=$(echo "$tcpext_vals" | awk "{print \$$ecn_idx}" 2>/dev/null || echo "0")
+    METRICS[tcp_sack_recovery]=$(echo "$tcpext_vals" | awk "{print \$$sack_idx}" 2>/dev/null || echo "0")
+    METRICS[tcp_loss_probes]=$(echo "$tcpext_vals" | awk "{print \$$probe_idx}" 2>/dev/null || echo "0")
+    METRICS[tcp_loss_probe_recovery]=$(echo "$tcpext_vals" | awk "{print \$$probe_recv_idx}" 2>/dev/null || echo "0")
 
     # 清理空值
     [[ -z "${METRICS[tcp_loss_events]}" ]] && METRICS[tcp_loss_events]=0
     [[ -z "${METRICS[tcp_fast_retrans]}" ]] && METRICS[tcp_fast_retrans]=0
     [[ -z "${METRICS[tcp_timeouts]}" ]] && METRICS[tcp_timeouts]=0
     [[ -z "${METRICS[tcp_ecn_marks]}" ]] && METRICS[tcp_ecn_marks]=0
+    [[ -z "${METRICS[tcp_sack_recovery]}" ]] && METRICS[tcp_sack_recovery]=0
+    [[ -z "${METRICS[tcp_loss_probes]}" ]] && METRICS[tcp_loss_probes]=0
+    [[ -z "${METRICS[tcp_loss_probe_recovery]}" ]] && METRICS[tcp_loss_probe_recovery]=0
 }
 
 # 从 NeoQ 获取队列统计
@@ -304,6 +329,9 @@ collect_neoq_stats() {
     METRICS[neoq_dropped]=0
     METRICS[neoq_ecn_marked]=0
     METRICS[neoq_avg_delay]=0
+    METRICS[neoq_express_packets]=0
+    METRICS[neoq_recovery_flows]=0
+    METRICS[neoq_retrans_detected]=0
 
     if [[ ! -f /proc/net/neoq ]]; then
         return
@@ -312,11 +340,12 @@ collect_neoq_stats() {
     local neoq_output=$(cat /proc/net/neoq 2>/dev/null)
 
     # 解析各层统计并累加
-    local total_packets=0 total_dropped=0 total_ecn=0
+    local total_packets=0 total_dropped=0 total_ecn=0 express_packets=0
 
     while IFS= read -r line; do
         # 匹配数据行 (Express, High, Normal, Bulk)
         if echo "$line" | grep -qE "^\s*(Express|High|Normal|Bulk)"; then
+            local tier_name=$(echo "$line" | awk '{print $1}')
             local packets=$(echo "$line" | awk '{print $2}')
             local dropped=$(echo "$line" | awk '{print $4}')
             local ecn=$(echo "$line" | awk '{print $5}')
@@ -324,6 +353,11 @@ collect_neoq_stats() {
             [[ -n "$packets" && "$packets" =~ ^[0-9]+$ ]] && total_packets=$((total_packets + packets))
             [[ -n "$dropped" && "$dropped" =~ ^[0-9]+$ ]] && total_dropped=$((total_dropped + dropped))
             [[ -n "$ecn" && "$ecn" =~ ^[0-9]+$ ]] && total_ecn=$((total_ecn + ecn))
+
+            # Express tier 通常包含重传包
+            if [[ "$tier_name" == "Express" ]]; then
+                [[ -n "$packets" && "$packets" =~ ^[0-9]+$ ]] && express_packets=$packets
+            fi
         fi
 
         # 提取平均延迟
@@ -331,11 +365,24 @@ collect_neoq_stats() {
             local avg_delay=$(echo "$line" | sed -n 's/.*Average:\s*\([0-9]*\).*/\1/p')
             [[ -n "$avg_delay" ]] && METRICS[neoq_avg_delay]=$avg_delay
         fi
+
+        # 提取 Recovery 流数量
+        if echo "$line" | grep -qi "recovery"; then
+            local recovery_cnt=$(echo "$line" | grep -oE "[0-9]+" | head -1)
+            [[ -n "$recovery_cnt" ]] && METRICS[neoq_recovery_flows]=$recovery_cnt
+        fi
+
+        # 提取重传检测统计
+        if echo "$line" | grep -qi "retrans"; then
+            local retrans_cnt=$(echo "$line" | grep -oE "[0-9]+" | head -1)
+            [[ -n "$retrans_cnt" ]] && METRICS[neoq_retrans_detected]=$retrans_cnt
+        fi
     done <<< "$neoq_output"
 
     METRICS[neoq_packets]=$total_packets
     METRICS[neoq_dropped]=$total_dropped
     METRICS[neoq_ecn_marked]=$total_ecn
+    METRICS[neoq_express_packets]=$express_packets
 }
 
 # 计算派生指标
@@ -363,7 +410,93 @@ calculate_derived_metrics() {
         METRICS[rtt_cv]=0
     fi
 
+    # === 计算增量指标 (用于检测丢包事件率) ===
+    local cur_retrans=${METRICS[tcp_retrans_segs]:-0}
+    local cur_out=${METRICS[tcp_out_segs]:-0}
+    local cur_loss=${METRICS[tcp_loss_events]:-0}
+    local cur_fast=${METRICS[tcp_fast_retrans]:-0}
+    local cur_timeout=${METRICS[tcp_timeouts]:-0}
+
+    # 计算增量
+    local delta_retrans=0 delta_out=0 delta_loss=0 delta_fast=0 delta_timeout=0
+
+    if [[ $PREV_OUT_SEGS -gt 0 && $cur_out -ge $PREV_OUT_SEGS ]]; then
+        delta_retrans=$((cur_retrans - PREV_RETRANS_SEGS))
+        delta_out=$((cur_out - PREV_OUT_SEGS))
+        delta_loss=$((cur_loss - PREV_LOSS_EVENTS))
+        delta_fast=$((cur_fast - PREV_FAST_RETRANS))
+        delta_timeout=$((cur_timeout - PREV_TIMEOUTS))
+    fi
+
+    # 保存当前值用于下次计算
+    PREV_RETRANS_SEGS=$cur_retrans
+    PREV_OUT_SEGS=$cur_out
+    PREV_LOSS_EVENTS=$cur_loss
+    PREV_FAST_RETRANS=$cur_fast
+    PREV_TIMEOUTS=$cur_timeout
+
+    # 计算实时丢包率 (千分比)
+    METRICS[realtime_loss_rate]=0
+    if [[ $delta_out -gt 100 ]]; then
+        METRICS[realtime_loss_rate]=$((delta_retrans * 1000 / delta_out))
+    fi
+
+    # 丢包事件率 (每秒)
+    METRICS[loss_events_rate]=$((delta_loss / SAMPLE_INTERVAL))
+    METRICS[fast_retrans_rate]=$((delta_fast / SAMPLE_INTERVAL))
+    METRICS[timeout_rate]=$((delta_timeout / SAMPLE_INTERVAL))
+
+    # === 计算综合丢包严重程度 (0-100) ===
+    local loss_severity=0
+
+    # 基于丢包率
+    if [[ ${METRICS[realtime_loss_rate]} -gt 100 ]]; then  # >10%
+        loss_severity=$((loss_severity + 40))
+    elif [[ ${METRICS[realtime_loss_rate]} -gt 50 ]]; then  # >5%
+        loss_severity=$((loss_severity + 25))
+    elif [[ ${METRICS[realtime_loss_rate]} -gt 20 ]]; then  # >2%
+        loss_severity=$((loss_severity + 15))
+    elif [[ ${METRICS[realtime_loss_rate]} -gt 10 ]]; then  # >1%
+        loss_severity=$((loss_severity + 8))
+    fi
+
+    # 基于超时率 (超时比快速重传更严重)
+    if [[ ${METRICS[timeout_rate]} -gt 10 ]]; then
+        loss_severity=$((loss_severity + 30))
+    elif [[ ${METRICS[timeout_rate]} -gt 5 ]]; then
+        loss_severity=$((loss_severity + 20))
+    elif [[ ${METRICS[timeout_rate]} -gt 1 ]]; then
+        loss_severity=$((loss_severity + 10))
+    fi
+
+    # 基于丢包事件率
+    if [[ ${METRICS[loss_events_rate]} -gt 20 ]]; then
+        loss_severity=$((loss_severity + 20))
+    elif [[ ${METRICS[loss_events_rate]} -gt 5 ]]; then
+        loss_severity=$((loss_severity + 10))
+    fi
+
+    # 基于 NeoQ 重传检测
+    if [[ ${METRICS[neoq_express_packets]} -gt 1000 ]]; then
+        loss_severity=$((loss_severity + 10))
+    fi
+
+    [[ $loss_severity -gt 100 ]] && loss_severity=100
+    METRICS[loss_severity]=$loss_severity
+
+    # 根据严重程度设置响应级别
+    if [[ $loss_severity -ge 60 ]]; then
+        LOSS_RESPONSE_LEVEL=3  # ultra
+    elif [[ $loss_severity -ge 40 ]]; then
+        LOSS_RESPONSE_LEVEL=2  # aggressive
+    elif [[ $loss_severity -ge 20 ]]; then
+        LOSS_RESPONSE_LEVEL=1  # mild
+    else
+        LOSS_RESPONSE_LEVEL=0  # normal
+    fi
+
     log DEBUG "Derived: drop_rate=${drop_rate}‰ ecn_rate=${ecn_rate}‰ rtt_cv=${METRICS[rtt_cv]}%"
+    log DEBUG "Loss: realtime=${METRICS[realtime_loss_rate]}‰ severity=$loss_severity level=$LOSS_RESPONSE_LEVEL"
 }
 
 # 综合采集
@@ -899,6 +1032,169 @@ apply_preset() {
             set_param "hybla_rtt_floor" 30000
             ;;
 
+        anti_loss)
+            # 激进抗丢包模式: 针对高丢包环境优化吞吐量
+            log ADJUST "Anti-loss mode: Aggressive recovery, fast retransmit"
+            set_param "min_cwnd" 64
+            set_param "max_cwnd" 20000
+            set_param "beta" 870               # 85% (快速恢复，少削减)
+            set_param "fast_alpha" 40          # 允许更大队列
+            set_param "fast_gamma" 70          # 慢速平滑，避免震荡
+
+            set_param "hd_enable" 1
+            set_param "hd_thresh_us" 80000
+            set_param "hd_ref_us" 30000
+            set_param "hd_cwnd_gain" 180
+            set_param "hd_pacing_gain" 160
+            set_param "hd_min_cwnd" 32
+            set_param "hd_startup_boost" 80
+            set_param "hd_boost" 40
+            set_param "hd_rho_max" 500
+
+            # 勇敢模式: 容忍更大抖动
+            set_param "brave_enable" 1
+            set_param "brave_rtt_pct" 50       # 容忍 50% RTT 波动
+            set_param "brave_hold_ms" 800      # 长时间保持
+            set_param "brave_floor_pct" 90     # 保持 90% 窗口
+
+            # 激进启动
+            set_param "turbo_startup" 1
+            set_param "startup_gain" 400       # 4x 启动增益
+            set_param "startup_min_rounds" 2   # 更少轮次
+
+            # ECN: 保守使用
+            set_param "ecn_enable" 1
+            set_param "ecn_factor" 95          # 仅削减 5%
+            set_param "ecn_thresh" 80          # 高阈值
+            set_param "ecn_alpha_gain" 8       # 慢速响应
+
+            # 快速恢复: 最大化
+            set_param "fast_recovery" 1
+            set_param "recovery_boost" 40      # 40% 恢复增益
+            set_param "loss_thresh" 5          # 5% 丢包才收缩
+            set_param "full_loss_cnt" 10       # 更高容忍
+            set_param "inflight_headroom" 25   # 25% 余量
+
+            # RACK-TLP: 超敏感检测
+            set_param "rack_enable" 1
+            set_param "rack_reord_thresh" 2    # 非常敏感
+            set_param "rack_min_rtt_div" 4     # 快速检测
+            set_param "tlp_enable" 1
+            set_param "tlp_timeout_div" 2
+            set_param "tlp_max_probes" 4       # 更多探测
+
+            # Hybla: 中等补偿
+            set_param "hybla_gain_exp" 150
+            set_param "hybla_rtt_floor" 15000
+
+            set_param "fast_path" 1
+            set_param "pacing_margin" 5        # 更多 pacing 余量
+            set_param "burst_mode" 1           # 启用突发模式
+            ;;
+
+        ultra_aggressive)
+            # 超激进模式: 最大吞吐量，不惜代价
+            log ADJUST "Ultra-aggressive mode: Maximum throughput, accepting queue buildup"
+            set_param "min_cwnd" 128
+            set_param "max_cwnd" 50000         # 超大窗口
+            set_param "beta" 922               # 90% (几乎不削减)
+            set_param "fast_alpha" 80          # 大队列目标
+            set_param "fast_gamma" 80          # 非常慢的平滑
+
+            set_param "hd_enable" 1
+            set_param "hd_thresh_us" 50000
+            set_param "hd_ref_us" 20000
+            set_param "hd_cwnd_gain" 250       # 2.5x cwnd
+            set_param "hd_pacing_gain" 200     # 2x pacing
+            set_param "hd_min_cwnd" 64
+            set_param "hd_startup_boost" 100   # 满启动增益
+            set_param "hd_boost" 60
+            set_param "hd_rho_max" 800         # 8x 最大补偿
+
+            # 勇敢模式: 极限容忍
+            set_param "brave_enable" 1
+            set_param "brave_rtt_pct" 80       # 容忍 80% RTT 波动
+            set_param "brave_hold_ms" 1500     # 1.5秒保持
+            set_param "brave_floor_pct" 95     # 保持 95% 窗口
+
+            # 超激进启动
+            set_param "turbo_startup" 1
+            set_param "startup_gain" 500       # 5x 启动增益
+            set_param "startup_min_rounds" 1
+
+            # ECN: 几乎忽略
+            set_param "ecn_enable" 1
+            set_param "ecn_factor" 98          # 仅削减 2%
+            set_param "ecn_thresh" 95
+            set_param "ecn_alpha_gain" 4       # 最慢响应
+
+            # 快速恢复: 极限
+            set_param "fast_recovery" 1
+            set_param "recovery_boost" 60      # 60% 恢复增益
+            set_param "loss_thresh" 10         # 10% 丢包才收缩
+            set_param "full_loss_cnt" 20
+            set_param "inflight_headroom" 40   # 40% 余量
+
+            # RACK-TLP: 最大化探测
+            set_param "rack_enable" 1
+            set_param "rack_reord_thresh" 1    # 最敏感
+            set_param "rack_min_rtt_div" 2
+            set_param "tlp_enable" 1
+            set_param "tlp_timeout_div" 1
+            set_param "tlp_max_probes" 6
+
+            # Hybla: 最大补偿
+            set_param "hybla_gain_exp" 200     # rho^2.0
+            set_param "hybla_rtt_floor" 10000
+
+            set_param "fast_path" 0            # 禁用快速路径，全程监控
+            set_param "pacing_margin" 10       # 大余量
+            set_param "burst_mode" 1
+
+            # 带宽探测: 更频繁
+            set_param "bw_probe_base_us" 1000000   # 1秒
+            set_param "bw_probe_rand_us" 500000
+            ;;
+
+        loss_recovery)
+            # 丢包恢复模式: 检测到丢包后自动切换
+            log ADJUST "Loss recovery mode: Optimized for active loss conditions"
+            set_param "min_cwnd" 48
+            set_param "max_cwnd" 15000
+            set_param "beta" 819               # 80%
+            set_param "fast_alpha" 30
+            set_param "fast_gamma" 60
+
+            # 勇敢模式
+            set_param "brave_enable" 1
+            set_param "brave_rtt_pct" 40
+            set_param "brave_hold_ms" 500
+            set_param "brave_floor_pct" 85
+
+            # 快速恢复
+            set_param "fast_recovery" 1
+            set_param "recovery_boost" 30
+            set_param "loss_thresh" 3
+            set_param "full_loss_cnt" 8
+            set_param "inflight_headroom" 20
+
+            # RACK-TLP: 敏感
+            set_param "rack_enable" 1
+            set_param "rack_reord_thresh" 2
+            set_param "rack_min_rtt_div" 4
+            set_param "tlp_enable" 1
+            set_param "tlp_timeout_div" 2
+            set_param "tlp_max_probes" 3
+
+            # Hybla: 中等
+            set_param "hybla_gain_exp" 140
+            set_param "hybla_rtt_floor" 18000
+
+            set_param "ecn_enable" 1
+            set_param "ecn_factor" 90
+            set_param "ecn_thresh" 60
+            ;;
+
         normal|*)
             # 默认/平衡模式
             set_param "min_cwnd" 64
@@ -1026,6 +1322,106 @@ fine_tune() {
             [[ $new -gt 25000 ]] && new=25000
             set_param "max_cwnd" $new
             log ADJUST "Network stable, avg_cwnd=$avg_cwnd, max_cwnd: $cur_max -> $new"
+        fi
+    fi
+
+    # === 6. 激进丢包响应 ===
+    local loss_severity=${METRICS[loss_severity]:-0}
+
+    if [[ $loss_severity -ge 40 ]]; then
+        # 严重丢包: 启用激进恢复
+        local cur_beta=$(get_param "beta")
+        if [[ ${cur_beta:-717} -lt 870 ]]; then
+            set_param "beta" 870
+            log ADJUST "Severe loss (severity=$loss_severity), beta: $cur_beta -> 870"
+        fi
+
+        # 增加恢复增益
+        local cur_boost=$(get_param "recovery_boost")
+        if [[ ${cur_boost:-20} -lt 40 ]]; then
+            set_param "recovery_boost" 40
+            log ADJUST "Enabling aggressive recovery_boost: 40"
+        fi
+
+        # 增加 inflight 余量
+        set_param "inflight_headroom" 30
+
+        # 增强 RACK-TLP
+        set_param "rack_reord_thresh" 2
+        set_param "tlp_max_probes" 4
+
+        # 勇敢模式增强
+        set_param "brave_enable" 1
+        set_param "brave_rtt_pct" 50
+        set_param "brave_hold_ms" 800
+        set_param "brave_floor_pct" 90
+
+    elif [[ $loss_severity -ge 20 ]]; then
+        # 中度丢包: 轻度调整
+        local cur_beta=$(get_param "beta")
+        if [[ ${cur_beta:-717} -lt 819 ]]; then
+            set_param "beta" 819
+            log ADJUST "Moderate loss (severity=$loss_severity), beta: $cur_beta -> 819"
+        fi
+
+        set_param "recovery_boost" 30
+        set_param "inflight_headroom" 20
+        set_param "tlp_max_probes" 3
+    fi
+
+    # === 7. 超时率高 -> 需要更激进的 TLP ===
+    if [[ ${METRICS[timeout_rate]:-0} -gt 5 ]]; then
+        set_param "tlp_enable" 1
+        set_param "tlp_timeout_div" 1       # 更短超时
+        set_param "tlp_max_probes" 4
+        log ADJUST "High timeout rate (${METRICS[timeout_rate]}/s), enhancing TLP"
+    fi
+
+    # === 8. NeoQ 集成: 调整 CoDel 参数 ===
+    if [[ -f /proc/net/neoq ]]; then
+        local rtt_avg=${METRICS[rtt_avg]:-0}
+        local iface=""
+
+        # 获取 NeoQ 启用的接口
+        for dev in $(ip -o link show | awk -F': ' '{print $2}' | grep -v lo); do
+            if tc qdisc show dev "$dev" 2>/dev/null | grep -q neoq; then
+                iface="$dev"
+                break
+            fi
+        done
+
+        if [[ -n "$iface" && $rtt_avg -gt 0 ]]; then
+            local target_us=$((rtt_avg * 1000 / 4))   # RTT/4 作为目标
+            local interval_us=$((rtt_avg * 1000 * 5)) # RTT*5 作为间隔
+
+            # 限制范围
+            [[ $target_us -lt 5000 ]] && target_us=5000
+            [[ $target_us -gt 200000 ]] && target_us=200000
+            [[ $interval_us -lt 20000 ]] && interval_us=20000
+            [[ $interval_us -gt 1000000 ]] && interval_us=1000000
+
+            # 丢包时更激进
+            if [[ $loss_severity -ge 40 ]]; then
+                target_us=$((target_us * 2))    # 更大队列容忍
+                interval_us=$((interval_us * 2))
+            fi
+
+            # 更新 NeoQ (需要 tc 命令支持)
+            tc qdisc change dev "$iface" root neoq target ${target_us}us interval ${interval_us}us 2>/dev/null && \
+                log ADJUST "NeoQ adjusted: target=${target_us}us interval=${interval_us}us on $iface"
+        fi
+    fi
+
+    # === 9. 丢包趋势下降时恢复 ===
+    local loss_trend=$(get_history_trend LOSS_HISTORY) || loss_trend=0
+    if [[ $loss_trend -lt -5 && ${METRICS[realtime_loss_rate]:-0} -lt 5 ]]; then
+        # 丢包改善，可以逐步恢复
+        local cur_beta=$(get_param "beta")
+        if [[ ${cur_beta:-717} -gt 750 ]]; then
+            local new_beta=$((cur_beta - 30))
+            [[ $new_beta -lt 717 ]] && new_beta=717
+            set_param "beta" $new_beta
+            log ADJUST "Loss improving, beta: $cur_beta -> $new_beta"
         fi
     fi
 }
@@ -1411,6 +1807,55 @@ case "${1:-}" in
     run)
         run_loop
         ;;
+    aggressive|anti-loss|anti_loss)
+        # 快速应用激进抗丢包预设
+        if ! check_sysctl; then
+            echo -e "${RED}LotSpeed module not loaded${NC}"
+            exit 1
+        fi
+        echo -e "${CYAN}Applying anti-loss preset...${NC}"
+        apply_preset "anti_loss"
+        echo -e "${GREEN}Done! Parameters optimized for loss recovery.${NC}"
+        echo
+        echo "Key settings:"
+        echo "  beta=870 (85% recovery)"
+        echo "  recovery_boost=40"
+        echo "  brave_hold_ms=800"
+        echo "  tlp_max_probes=4"
+        ;;
+    ultra|ultra-aggressive|ultra_aggressive)
+        # 快速应用超激进预设
+        if ! check_sysctl; then
+            echo -e "${RED}LotSpeed module not loaded${NC}"
+            exit 1
+        fi
+        echo -e "${CYAN}Applying ultra-aggressive preset...${NC}"
+        apply_preset "ultra_aggressive"
+        echo -e "${GREEN}Done! Maximum throughput mode enabled.${NC}"
+        echo
+        echo "Key settings:"
+        echo "  beta=922 (90% recovery)"
+        echo "  max_cwnd=50000"
+        echo "  startup_gain=500"
+        echo "  hybla_gain_exp=200 (rho^2.0)"
+        ;;
+    preset)
+        # 手动应用指定预设
+        if [[ -z "$2" ]]; then
+            echo "Usage: $0 preset <name>"
+            echo "Available: normal, anti_loss, ultra_aggressive, loss_recovery,"
+            echo "           datacenter, satellite, highdelay, lossy, lossy_severe,"
+            echo "           jittery, congested, lan, mild_congestion"
+            exit 1
+        fi
+        if ! check_sysctl; then
+            echo -e "${RED}LotSpeed module not loaded${NC}"
+            exit 1
+        fi
+        echo -e "${CYAN}Applying preset: $2${NC}"
+        apply_preset "$2"
+        echo -e "${GREEN}Done!${NC}"
+        ;;
     once|test|"")
         run_once
         ;;
@@ -1425,6 +1870,21 @@ case "${1:-}" in
         echo "  daemon    Start background daemon"
         echo "  stop      Stop background daemon"
         echo "  restart   Restart daemon"
+        echo "  aggressive    Apply anti_loss preset immediately"
+        echo "  ultra         Apply ultra_aggressive preset"
+        echo
+        echo "Presets (use with 'lotspeed preset <name>'):"
+        echo "  normal        Balanced settings (default)"
+        echo "  anti_loss     Aggressive loss recovery, fast retransmit"
+        echo "  ultra_aggressive  Maximum throughput, large queues"
+        echo "  loss_recovery Optimized for active loss conditions"
+        echo "  datacenter    Ultra-low latency, ECN-focused"
+        echo "  satellite     Very high delay (300+ ms)"
+        echo "  highdelay     High delay WAN (100-300ms)"
+        echo "  lossy         Moderate packet loss (1-5%)"
+        echo "  lossy_severe  Severe packet loss (>5%)"
+        echo "  jittery       High RTT variance (mobile/WiFi)"
+        echo "  congested     High ECN marks"
         echo
         echo "Environment:"
         echo "  DEBUG=1   Enable debug output"
