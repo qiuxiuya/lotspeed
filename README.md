@@ -18,6 +18,9 @@
 
 
 ### lotspeed helper
+
+> 速度起不来执行： /usr/local/bin/lotspeed-autotune restart
+
 ```
 
 root@dev-kernel:~# lotspeed help
