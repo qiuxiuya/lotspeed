@@ -732,8 +732,7 @@ interactive_menu() {
                 echo -e "${GREEN}Algorithm switched to $default_cc${NC}"
                 echo -e "${YELLOW}Kernel modules are still loaded in memory${NC}"
                 echo -e "${YELLOW}To fully unload, reboot then run:${NC}"
-                echo -e "${CYAN}  sudo rmmod lotspeed${NC}"
-                echo -e "${CYAN}  sudo rmmod sch_neoq${NC}"
+                echo -e "${CYAN} lotspeed uninstall ${NC}"
                 read -p "Press Enter to continue..."
                 ;;
             8)
