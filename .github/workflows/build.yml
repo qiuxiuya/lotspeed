@@ -10,11 +10,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        kernel_version:
-          - "6.18.2" # LTS
 
     steps:
       - name: Checkout code
@@ -25,33 +20,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev
 
-      - name: Cache kernel source
+      - name: Cache BBRv3 kernel source
         uses: actions/cache@v4
         id: cache-kernel
         with:
-          path: ~/kernel-${{ matrix.kernel_version }}
-          key: kernel-${{ matrix.kernel_version }}-v1
+          path: ~/kernel-bbrv3
+          key: kernel-bbrv3-v3-${{ hashFiles('.github/workflows/build.yml') }}
 
-      - name: Download and prepare kernel ${{ matrix.kernel_version }}
+      - name: Download and prepare BBRv3 kernel
         if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
-          KERNEL_VERSION=${{ matrix.kernel_version }}
-          MAJOR_VERSION=$(echo $KERNEL_VERSION | cut -d. -f1)
+          # Clone Google's BBR repository (contains BBRv3 patches)
+          git clone --depth 1 https://github.com/google/bbr.git ~/bbr-repo
+          cd ~/bbr-repo
 
-          # Download kernel source
-          if [ "$MAJOR_VERSION" = "5" ]; then
-            KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${KERNEL_VERSION}.tar.xz"
-          else
-            KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz"
-          fi
+          # Get the latest BBRv3 branch
+          git fetch --depth 1 origin v3
+          git checkout FETCH_HEAD
 
-          echo "Downloading kernel from: $KERNEL_URL"
-          wget -q "$KERNEL_URL" -O linux-${KERNEL_VERSION}.tar.xz
-          tar xf linux-${KERNEL_VERSION}.tar.xz
-          mv linux-${KERNEL_VERSION} ~/kernel-${KERNEL_VERSION}
+          mv ~/bbr-repo ~/kernel-bbrv3
 
           # Prepare kernel headers
-          cd ~/kernel-${KERNEL_VERSION}
+          cd ~/kernel-bbrv3
           make defconfig
           make modules_prepare
           # Create empty Module.symvers to avoid modpost warnings
@@ -59,10 +49,10 @@ jobs:
 
       - name: Build kernel module
         run: |
-          KERNEL_VERSION=${{ matrix.kernel_version }}
-          KERNEL_DIR=~/kernel-${KERNEL_VERSION}
+          KERNEL_DIR=~/kernel-bbrv3
+          KERNEL_VERSION=$(make -s -C $KERNEL_DIR kernelversion)
 
-          echo "Building for kernel $KERNEL_VERSION"
+          echo "Building for BBRv3 kernel $KERNEL_VERSION"
           echo "Kernel directory: $KERNEL_DIR"
 
           # Use KBUILD_MODPOST_WARN=1 to turn modpost errors into warnings for CI
@@ -82,6 +72,6 @@ jobs:
       - name: Upload kernel module artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lotspeed-${{ matrix.kernel_version }}
+          name: lotspeed-bbrv3
           path: lotspeed.ko
           retention-days: 7
