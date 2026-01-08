@@ -1092,17 +1092,27 @@ DEFCONF
 # 快速命令
 case "$1" in
     start)
-        modprobe lotspeed 2>/dev/null || insmod $INSTALL_DIR/lotspeed.ko
-        sleep 1
-        sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null
+        # 加载模块（如果未加载）
+        if ! lsmod | grep -q "^lotspeed "; then
+            modprobe lotspeed 2>/dev/null || insmod $INSTALL_DIR/lotspeed.ko 2>/dev/null || {
+                echo -e "${RED}Failed to load lotspeed module${NC}"
+                exit 1
+            }
+            sleep 1
+        fi
+        # 切换算法
+        sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null 2>&1
         # 加载保存的配置
         if [[ -f "$CONFIG_FILE" ]]; then
             load_config
         fi
-        echo -e "${GREEN}LotSpeed started${NC}"
+        echo -e "${GREEN}LotSpeed started (CC: lotspeed)${NC}"
         ;;
     stop)
-        safe_unload "lotspeed" "lotspeed"
+        # 只切换算法，不卸载模块
+        local default_cc=$(get_default_cc)
+        sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+        echo -e "${GREEN}LotSpeed stopped (CC: $default_cc)${NC}"
         ;;
     restart)
         $0 stop
@@ -1193,18 +1203,12 @@ case "$1" in
             tc qdisc replace dev $iface root $default_qdisc 2>/dev/null || \
             tc qdisc del dev $iface root 2>/dev/null || true
         done
-        # 还原系统默认 qdisc 设置
         if [[ -n "$default_qdisc" ]]; then
             sysctl -w net.core.default_qdisc=$default_qdisc >/dev/null 2>&1 || true
         fi
 
-        # ========== 步骤 5: 强制卸载内核模块 ==========
-        print_box_row "Step 5: Force unloading kernel modules..." "left" "${RED}"
-        rmmod sch_neoq -f 2>/dev/null || true
-        rmmod lotspeed -f 2>/dev/null || true
-
-        # ========== 步骤 6: 清理所有文件 ==========
-        print_box_row "Step 6: Cleaning up all files..." "left" "${RED}"
+        # ========== 步骤 5: 清理所有文件 ==========
+        print_box_row "Step 5: Cleaning up all files..." "left" "${RED}"
         # 清理管理工具
         rm -f /usr/local/bin/lotspeed
         # 清理源码和编译目录
@@ -1233,19 +1237,11 @@ case "$1" in
         print_box_div "${RED}"
         print_box_row "${GREEN}Uninstall completed!${NC}" "center" "${RED}"
         print_box_div "${RED}"
-
-        # 检查模块是否仍然加载
-        if lsmod | grep -qE "^lotspeed |^sch_neoq "; then
-            print_box_row "${YELLOW}Kernel modules still loaded, reboot required${NC}" "center" "${RED}"
-            print_box_div "${RED}"
-            print_box_row "After reboot, run to verify cleanup:" "left" "${RED}"
-            print_box_row "${CYAN}sudo rm -f /lib/modules/\$(uname -r)/kernel/net/ipv4/lotspeed.ko${NC}" "left" "${RED}"
-            print_box_row "${CYAN}sudo rm -f /lib/modules/\$(uname -r)/kernel/net/sched/sch_neoq.ko${NC}" "left" "${RED}"
-            print_box_row "${CYAN}sudo depmod -a${NC}" "left" "${RED}"
-        else
-            print_box_row "${GREEN}All modules unloaded successfully${NC}" "center" "${RED}"
-        fi
-
+        print_box_row "${YELLOW}Kernel modules are still loaded in memory${NC}" "center" "${RED}"
+        print_box_row "Please reboot, then run:" "center" "${RED}"
+        print_box_div "${RED}"
+        print_box_row "${CYAN}sudo rmmod lotspeed${NC}" "left" "${RED}"
+        print_box_row "${CYAN}sudo rmmod sch_neoq${NC}" "left" "${RED}"
         print_box_bottom "${RED}"
         ;;
     help|--help|-h)
@@ -1506,13 +1502,8 @@ MF
                     sysctl -w net.core.default_qdisc=$default_qdisc >/dev/null 2>&1 || true
                 fi
 
-                # ========== 步骤 5: 强制卸载内核模块 ==========
-                print_box_row "Step 5: Force unloading kernel modules..." "left" "${RED}"
-                rmmod sch_neoq -f 2>/dev/null || true
-                rmmod lotspeed -f 2>/dev/null || true
-
-                # ========== 步骤 6: 清理所有文件 ==========
-                print_box_row "Step 6: Cleaning up all files..." "left" "${RED}"
+                # ========== 步骤 5: 清理所有文件 ==========
+                print_box_row "Step 5: Cleaning up all files..." "left" "${RED}"
                 rm -f /usr/local/bin/lotspeed
                 rm -rf $INSTALL_DIR
                 rm -f /etc/modules-load.d/lotspeed.conf
@@ -1534,18 +1525,11 @@ MF
                 print_box_div "${RED}"
                 print_box_row "${GREEN}Uninstall completed!${NC}" "center" "${RED}"
                 print_box_div "${RED}"
-
-                if lsmod | grep -qE "^lotspeed |^sch_neoq "; then
-                    print_box_row "${YELLOW}Kernel modules still loaded, reboot required${NC}" "center" "${RED}"
-                    print_box_div "${RED}"
-                    print_box_row "After reboot, run to verify cleanup:" "left" "${RED}"
-                    print_box_row "${CYAN}sudo rm -f /lib/modules/\$(uname -r)/kernel/net/ipv4/lotspeed.ko${NC}" "left" "${RED}"
-                    print_box_row "${CYAN}sudo rm -f /lib/modules/\$(uname -r)/kernel/net/sched/sch_neoq.ko${NC}" "left" "${RED}"
-                    print_box_row "${CYAN}sudo depmod -a${NC}" "left" "${RED}"
-                else
-                    print_box_row "${GREEN}All modules unloaded successfully${NC}" "center" "${RED}"
-                fi
-
+                print_box_row "${YELLOW}Kernel modules are still loaded in memory${NC}" "center" "${RED}"
+                print_box_row "Please reboot, then run:" "center" "${RED}"
+                print_box_div "${RED}"
+                print_box_row "${CYAN}sudo rmmod lotspeed${NC}" "left" "${RED}"
+                print_box_row "${CYAN}sudo rmmod sch_neoq${NC}" "left" "${RED}"
                 print_box_bottom "${RED}"
             fi
             ;;
