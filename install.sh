@@ -213,11 +213,10 @@ check_old_modules_loaded() {
         print_box_row "Old modules must be unloaded before reinstalling." "left" "${YELLOW}"
         print_box_row "" "left" "${YELLOW}"
         print_box_row "Please follow these steps:" "left" "${YELLOW}"
-        print_box_row "  1. Run: ${CYAN}lotspeed${NC}" "left" "${YELLOW}"
-        print_box_row "  2. Select option ${CYAN}7) Disable all${NC}" "left" "${YELLOW}"
-        print_box_row "  3. ${RED}Reboot${NC} the system" "left" "${YELLOW}"
-        print_box_row "  4. ${RED}rmmod${NC} ${YELLOW}lotspeed${NC} and ${YELLOW}sch_neoq${NC}" "left" "${YELLOW}"
-        print_box_row "  5. Run this installer again" "left" "${YELLOW}"
+        print_box_row "  1. Run: ${CYAN}lotspeed uninstall${NC}" "left" "${YELLOW}"
+        print_box_row "  2. ${RED}Reboot${NC} the system" "left" "${YELLOW}"
+        print_box_row "  3. ${RED}lsmod check${NC} ${YELLOW}lotspeed${NC} and ${YELLOW}sch_neoq${NC}" "left" "${YELLOW}"
+        print_box_row "  4. Run this installer again" "left" "${YELLOW}"
         print_box_div "${YELLOW}"
 
         # 检查 lotspeed 命令是否存在
