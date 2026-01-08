@@ -201,19 +201,19 @@ download_source() {
     cd $INSTALL_DIR
 
     # 下载 LotSpeed 源码
-    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c || {
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/refs/heads/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c || {
         log_error "Failed to download lotspeed.c"
         exit 1
     }
 
     # 下载 NeoQ 源码
-    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/qdisc_newneo.c" -o qdisc_newneo.c || {
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/refs/heads/$GITHUB_BRANCH/qdisc_newneo.c" -o qdisc_newneo.c || {
         log_error "Failed to download qdisc_newneo.c"
         exit 1
     }
 
     # 下载 Auto-Tune 脚本
-    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed-autotune.sh" -o lotspeed-autotune.sh || {
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/refs/heads/$GITHUB_BRANCH/lotspeed-autotune.sh" -o lotspeed-autotune.sh || {
         log_warn "Failed to download lotspeed-autotune.sh (optional)"
     }
     chmod +x lotspeed-autotune.sh 2>/dev/null || true
@@ -1112,9 +1112,9 @@ case "$1" in
         ;;
     stop)
         # 只切换算法，不卸载模块
-        local default_cc=$(get_default_cc)
-        sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
-        echo -e "${GREEN}LotSpeed stopped (CC: $default_cc)${NC}"
+        _default_cc=$(get_default_cc)
+        sysctl -w net.ipv4.tcp_congestion_control=$_default_cc >/dev/null 2>&1
+        echo -e "${GREEN}LotSpeed stopped (CC: $_default_cc)${NC}"
         ;;
     restart)
         $0 stop
@@ -1194,25 +1194,26 @@ case "$1" in
         systemctl daemon-reload 2>/dev/null || true
 
         # ========== 步骤 3: 切换到默认拥塞控制算法 ==========
-        local default_cc=$(get_default_cc)
-        print_box_row "Step 3: Switching CC to $default_cc..." "left" "${RED}"
-        sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+        _default_cc=$(get_default_cc)
+        print_box_row "Step 3: Switching CC to $_default_cc..." "left" "${RED}"
+        sysctl -w net.ipv4.tcp_congestion_control=$_default_cc >/dev/null 2>&1
 
         # ========== 步骤 4: 还原 qdisc 到默认值 ==========
         print_box_row "Step 4: Restoring default qdisc..." "left" "${RED}"
-        local default_qdisc=$(get_default_qdisc)
+        _default_qdisc=$(get_default_qdisc)
         for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
-            tc qdisc replace dev $iface root $default_qdisc 2>/dev/null || \
+            tc qdisc replace dev $iface root $_default_qdisc 2>/dev/null || \
             tc qdisc del dev $iface root 2>/dev/null || true
         done
-        if [[ -n "$default_qdisc" ]]; then
-            sysctl -w net.core.default_qdisc=$default_qdisc >/dev/null 2>&1 || true
+        if [[ -n "$_default_qdisc" ]]; then
+            sysctl -w net.core.default_qdisc=$_default_qdisc >/dev/null 2>&1 || true
         fi
 
         # ========== 步骤 5: 清理所有文件 ==========
         print_box_row "Step 5: Cleaning up all files..." "left" "${RED}"
         # 清理管理工具
         rm -f /usr/local/bin/lotspeed
+        rm -f /usr/local/bin/lotspeed-autotune
         # 清理源码和编译目录
         rm -rf $INSTALL_DIR
         # 清理模块加载配置
@@ -1246,6 +1247,19 @@ case "$1" in
         print_box_row "${CYAN}sudo rmmod sch_neoq${NC}" "left" "${RED}"
         print_box_bottom "${RED}"
         ;;
+    autotune)
+        # 调用 autotune 脚本
+        if [[ -x /usr/local/bin/lotspeed-autotune ]]; then
+            shift
+            /usr/local/bin/lotspeed-autotune "$@"
+        elif [[ -x $INSTALL_DIR/lotspeed-autotune.sh ]]; then
+            shift
+            $INSTALL_DIR/lotspeed-autotune.sh "$@"
+        else
+            echo -e "${RED}lotspeed-autotune not found${NC}"
+            exit 1
+        fi
+        ;;
     help|--help|-h)
         print_box_top
         print_box_row "LotSpeed v2.2 + NeoQ v3.1 Commands" "center"
@@ -1273,6 +1287,7 @@ case "$1" in
         print_box_row "${BOLD}Other${NC}" "left"
         print_kv_row "lotspeed log" "Show kernel logs"
         print_kv_row "lotspeed monitor" "Live log monitoring"
+        print_kv_row "lotspeed autotune" "Auto-tune network params"
         print_kv_row "lotspeed uninstall" "Remove everything"
         print_box_div
         print_box_row "Presets: conservative, balanced, aggressive," "left"
@@ -1289,6 +1304,13 @@ SCRIPT_EOF
 
     chmod +x /usr/local/bin/lotspeed
     log_success "Management script created at /usr/local/bin/lotspeed"
+
+    # 安装 autotune 脚本
+    if [[ -f "$INSTALL_DIR/lotspeed-autotune.sh" ]]; then
+        cp "$INSTALL_DIR/lotspeed-autotune.sh" /usr/local/bin/lotspeed-autotune
+        chmod +x /usr/local/bin/lotspeed-autotune
+        log_success "Autotune script installed at /usr/local/bin/lotspeed-autotune"
+    fi
 }
 
 # ================= 创建 systemd 服务 =================
@@ -1415,7 +1437,7 @@ interactive_install() {
 
             mkdir -p $INSTALL_DIR
             cd $INSTALL_DIR
-            curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c
+            curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/refs/heads/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c
 
             cat > Makefile << 'MF'
 obj-m += lotspeed.o
@@ -1442,7 +1464,7 @@ MF
 
             mkdir -p $INSTALL_DIR
             cd $INSTALL_DIR
-            curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/qdisc_newneo.c" -o qdisc_newneo.c
+            curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/refs/heads/$GITHUB_BRANCH/qdisc_newneo.c" -o qdisc_newneo.c
 
             cat > Makefile << 'MF'
 obj-m += sch_neoq.o
