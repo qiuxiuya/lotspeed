@@ -2,7 +2,7 @@ name: Build Kernel Module
 
 on:
   push:
-    branches: [ main, ml-tcp ]
+    branches: [ main, zeta-tcp ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
