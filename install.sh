@@ -222,7 +222,7 @@ check_old_modules_loaded() {
         # 检查 lotspeed 命令是否存在
         if [[ -x /usr/local/bin/lotspeed ]]; then
             print_box_row "Or run directly:" "left" "${YELLOW}"
-            print_box_row "  ${CYAN}lotspeed stop && sudo reboot${NC}" "left" "${YELLOW}"
+            print_box_row "  ${CYAN}lotspeed stop && lotspeed uninstall && sudo reboot${NC}" "left" "${YELLOW}"
             print_box_div "${YELLOW}"
         fi
 
