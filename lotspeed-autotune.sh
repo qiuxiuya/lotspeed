@@ -1954,7 +1954,7 @@ case "${1:-}" in
         echo "  aggressive    Apply anti_loss preset immediately"
         echo "  ultra         Apply ultra_aggressive preset"
         echo
-        echo "Presets (use with '<name>'):"
+        echo "Presets (use with 'preset <name>'):"
         echo "  normal        Balanced settings (default)"
         echo "  anti_loss     Aggressive loss recovery, fast retransmit"
         echo "  ultra_aggressive  Maximum throughput, large queues"
