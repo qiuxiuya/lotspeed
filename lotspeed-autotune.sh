@@ -162,7 +162,7 @@ collect_ss_stats() {
 
         # 检查是否是 lotspeed 连接
         if echo "$line" | grep -q "lotspeed"; then
-            ((lotspeed_count++))
+            lotspeed_count=$((lotspeed_count + 1))
         fi
 
         # 提取 RTT (格式: rtt:123.456/45.678)
@@ -174,7 +174,7 @@ collect_ss_stats() {
                 [[ -z "$rtt_int" || "$rtt_int" == "0" ]] && rtt_int=1
 
                 rtt_sum=$((rtt_sum + rtt_int))
-                ((rtt_count++))
+                rtt_count=$((rtt_count + 1))
                 [[ $rtt_int -lt $rtt_min ]] && rtt_min=$rtt_int
                 [[ $rtt_int -gt $rtt_max ]] && rtt_max=$rtt_int
             fi
@@ -185,7 +185,7 @@ collect_ss_stats() {
             local cwnd_str=$(echo "$line" | sed -n 's/.*cwnd:\([0-9]*\).*/\1/p')
             if [[ -n "$cwnd_str" && "$cwnd_str" -gt 0 ]]; then
                 cwnd_sum=$((cwnd_sum + cwnd_str))
-                ((cwnd_count++))
+                cwnd_count=$((cwnd_count + 1))
             fi
         fi
 
@@ -202,7 +202,7 @@ collect_ss_stats() {
                 local pacing_int=${pacing_str%%.*}
                 [[ -n "$pacing_int" && "$pacing_int" -gt 0 ]] && {
                     pacing_sum=$((pacing_sum + pacing_int))
-                    ((pacing_count++))
+                    pacing_count=$((pacing_count + 1))
                 }
             fi
         fi
@@ -263,13 +263,31 @@ collect_snmp_stats() {
             InSegs) in_idx=$idx ;;
             OutSegs) out_idx=$idx ;;
         esac
-        ((idx++))
+        idx=$((idx + 1))
     done
 
-    # 提取值
-    METRICS[tcp_retrans_segs]=$(echo "$tcp_vals" | awk "{print \$$retrans_idx}")
-    METRICS[tcp_in_segs]=$(echo "$tcp_vals" | awk "{print \$$in_idx}")
-    METRICS[tcp_out_segs]=$(echo "$tcp_vals" | awk "{print \$$out_idx}")
+    # 安全提取值
+    local val
+    if [[ $retrans_idx -gt 0 ]]; then
+        val=$(echo "$tcp_vals" | awk "{print \$$retrans_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_retrans_segs]=$val || METRICS[tcp_retrans_segs]=0
+    else
+        METRICS[tcp_retrans_segs]=0
+    fi
+
+    if [[ $in_idx -gt 0 ]]; then
+        val=$(echo "$tcp_vals" | awk "{print \$$in_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_in_segs]=$val || METRICS[tcp_in_segs]=0
+    else
+        METRICS[tcp_in_segs]=0
+    fi
+
+    if [[ $out_idx -gt 0 ]]; then
+        val=$(echo "$tcp_vals" | awk "{print \$$out_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_out_segs]=$val || METRICS[tcp_out_segs]=0
+    else
+        METRICS[tcp_out_segs]=0
+    fi
 }
 
 # 从 /proc/net/netstat 获取扩展 TCP 统计
@@ -302,25 +320,59 @@ collect_netstat_stats() {
             TCPLossProbes) probe_idx=$idx ;;
             TCPLossProbeRecovery) probe_recv_idx=$idx ;;
         esac
-        ((idx++))
+        idx=$((idx + 1))
     done
 
-    METRICS[tcp_loss_events]=$(echo "$tcpext_vals" | awk "{print \$$loss_idx}" 2>/dev/null || echo "0")
-    METRICS[tcp_fast_retrans]=$(echo "$tcpext_vals" | awk "{print \$$fast_idx}" 2>/dev/null || echo "0")
-    METRICS[tcp_timeouts]=$(echo "$tcpext_vals" | awk "{print \$$timeout_idx}" 2>/dev/null || echo "0")
-    METRICS[tcp_ecn_marks]=$(echo "$tcpext_vals" | awk "{print \$$ecn_idx}" 2>/dev/null || echo "0")
-    METRICS[tcp_sack_recovery]=$(echo "$tcpext_vals" | awk "{print \$$sack_idx}" 2>/dev/null || echo "0")
-    METRICS[tcp_loss_probes]=$(echo "$tcpext_vals" | awk "{print \$$probe_idx}" 2>/dev/null || echo "0")
-    METRICS[tcp_loss_probe_recovery]=$(echo "$tcpext_vals" | awk "{print \$$probe_recv_idx}" 2>/dev/null || echo "0")
+    # 安全提取数值 - 只有当索引 > 0 时才提取
+    local val
+    if [[ $loss_idx -gt 0 ]]; then
+        val=$(echo "$tcpext_vals" | awk "{print \$$loss_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_loss_events]=$val || METRICS[tcp_loss_events]=0
+    else
+        METRICS[tcp_loss_events]=0
+    fi
 
-    # 清理空值
-    [[ -z "${METRICS[tcp_loss_events]}" ]] && METRICS[tcp_loss_events]=0
-    [[ -z "${METRICS[tcp_fast_retrans]}" ]] && METRICS[tcp_fast_retrans]=0
-    [[ -z "${METRICS[tcp_timeouts]}" ]] && METRICS[tcp_timeouts]=0
-    [[ -z "${METRICS[tcp_ecn_marks]}" ]] && METRICS[tcp_ecn_marks]=0
-    [[ -z "${METRICS[tcp_sack_recovery]}" ]] && METRICS[tcp_sack_recovery]=0
-    [[ -z "${METRICS[tcp_loss_probes]}" ]] && METRICS[tcp_loss_probes]=0
-    [[ -z "${METRICS[tcp_loss_probe_recovery]}" ]] && METRICS[tcp_loss_probe_recovery]=0
+    if [[ $fast_idx -gt 0 ]]; then
+        val=$(echo "$tcpext_vals" | awk "{print \$$fast_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_fast_retrans]=$val || METRICS[tcp_fast_retrans]=0
+    else
+        METRICS[tcp_fast_retrans]=0
+    fi
+
+    if [[ $timeout_idx -gt 0 ]]; then
+        val=$(echo "$tcpext_vals" | awk "{print \$$timeout_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_timeouts]=$val || METRICS[tcp_timeouts]=0
+    else
+        METRICS[tcp_timeouts]=0
+    fi
+
+    if [[ $ecn_idx -gt 0 ]]; then
+        val=$(echo "$tcpext_vals" | awk "{print \$$ecn_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_ecn_marks]=$val || METRICS[tcp_ecn_marks]=0
+    else
+        METRICS[tcp_ecn_marks]=0
+    fi
+
+    if [[ $sack_idx -gt 0 ]]; then
+        val=$(echo "$tcpext_vals" | awk "{print \$$sack_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_sack_recovery]=$val || METRICS[tcp_sack_recovery]=0
+    else
+        METRICS[tcp_sack_recovery]=0
+    fi
+
+    if [[ $probe_idx -gt 0 ]]; then
+        val=$(echo "$tcpext_vals" | awk "{print \$$probe_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_loss_probes]=$val || METRICS[tcp_loss_probes]=0
+    else
+        METRICS[tcp_loss_probes]=0
+    fi
+
+    if [[ $probe_recv_idx -gt 0 ]]; then
+        val=$(echo "$tcpext_vals" | awk "{print \$$probe_recv_idx}" 2>/dev/null)
+        [[ "$val" =~ ^[0-9]+$ ]] && METRICS[tcp_loss_probe_recovery]=$val || METRICS[tcp_loss_probe_recovery]=0
+    else
+        METRICS[tcp_loss_probe_recovery]=0
+    fi
 }
 
 # 从 NeoQ 获取队列统计
@@ -387,6 +439,29 @@ collect_neoq_stats() {
 
 # 计算派生指标
 calculate_derived_metrics() {
+    # 辅助函数：确保值是数字
+    _ensure_num() {
+        local val="$1"
+        if [[ "$val" =~ ^[0-9]+$ ]]; then
+            echo "$val"
+        else
+            echo "0"
+        fi
+    }
+
+    # 确保所有 METRICS 值是数字
+    METRICS[neoq_packets]=$(_ensure_num "${METRICS[neoq_packets]}")
+    METRICS[neoq_dropped]=$(_ensure_num "${METRICS[neoq_dropped]}")
+    METRICS[neoq_ecn_marked]=$(_ensure_num "${METRICS[neoq_ecn_marked]}")
+    METRICS[tcp_out_segs]=$(_ensure_num "${METRICS[tcp_out_segs]}")
+    METRICS[tcp_retrans_segs]=$(_ensure_num "${METRICS[tcp_retrans_segs]}")
+    METRICS[rtt_avg]=$(_ensure_num "${METRICS[rtt_avg]}")
+    METRICS[rtt_jitter]=$(_ensure_num "${METRICS[rtt_jitter]}")
+    METRICS[tcp_loss_events]=$(_ensure_num "${METRICS[tcp_loss_events]}")
+    METRICS[tcp_fast_retrans]=$(_ensure_num "${METRICS[tcp_fast_retrans]}")
+    METRICS[tcp_timeouts]=$(_ensure_num "${METRICS[tcp_timeouts]}")
+    METRICS[neoq_express_packets]=$(_ensure_num "${METRICS[neoq_express_packets]}")
+
     # 丢包率 (基于 NeoQ 或 SNMP)
     local drop_rate=0
     if [[ ${METRICS[neoq_packets]} -gt 1000 ]]; then
@@ -411,11 +486,11 @@ calculate_derived_metrics() {
     fi
 
     # === 计算增量指标 (用于检测丢包事件率) ===
-    local cur_retrans=${METRICS[tcp_retrans_segs]:-0}
-    local cur_out=${METRICS[tcp_out_segs]:-0}
-    local cur_loss=${METRICS[tcp_loss_events]:-0}
-    local cur_fast=${METRICS[tcp_fast_retrans]:-0}
-    local cur_timeout=${METRICS[tcp_timeouts]:-0}
+    local cur_retrans=$(_ensure_num "${METRICS[tcp_retrans_segs]}")
+    local cur_out=$(_ensure_num "${METRICS[tcp_out_segs]}")
+    local cur_loss=$(_ensure_num "${METRICS[tcp_loss_events]}")
+    local cur_fast=$(_ensure_num "${METRICS[tcp_fast_retrans]}")
+    local cur_timeout=$(_ensure_num "${METRICS[tcp_timeouts]}")
 
     # 计算增量
     local delta_retrans=0 delta_out=0 delta_loss=0 delta_fast=0 delta_timeout=0
@@ -544,17 +619,17 @@ get_history_avg() {
     case "$arr_name" in
         RTT_HISTORY)
             for val in "${RTT_HISTORY[@]}"; do
-                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); ((count++)); }
+                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); count=$((count + 1)); }
             done
             ;;
         LOSS_HISTORY)
             for val in "${LOSS_HISTORY[@]}"; do
-                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); ((count++)); }
+                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); count=$((count + 1)); }
             done
             ;;
         RETRANS_HISTORY)
             for val in "${RETRANS_HISTORY[@]}"; do
-                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); ((count++)); }
+                [[ -n "$val" && "$val" =~ ^[0-9]+$ ]] && { sum=$((sum + val)); count=$((count + 1)); }
             done
             ;;
     esac
@@ -1481,6 +1556,9 @@ EOF
 # ============================================================================
 
 show_status() {
+    # 禁用 set -e 防止采集失败导致退出
+    set +e
+
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║              LotSpeed Auto-Tune Status v2.1                        ║${NC}"
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
@@ -1598,7 +1676,7 @@ start_daemon() {
     local wait_count=0
     while [[ ! -f "$PID_FILE" ]] && [[ $wait_count -lt 10 ]]; do
         sleep 0.5
-        ((wait_count++))
+        wait_count=$((wait_count + 1))
     done
 
     if [[ -f "$PID_FILE" ]]; then
@@ -1685,6 +1763,9 @@ run_loop() {
 # ============================================================================
 
 run_once() {
+    # 禁用 set -e 防止采集失败导致退出
+    set +e
+
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║              LotSpeed Auto-Tune - Analysis                         ║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════════════╝${NC}"
@@ -1696,7 +1777,7 @@ run_once() {
     fi
 
     echo -e "${YELLOW}Step 1: Collecting metrics...${NC}"
-    collect_all_metrics
+    collect_all_metrics || true
     echo -e "${GREEN}Done${NC}"
     echo
 
@@ -1873,7 +1954,7 @@ case "${1:-}" in
         echo "  aggressive    Apply anti_loss preset immediately"
         echo "  ultra         Apply ultra_aggressive preset"
         echo
-        echo "Presets (use with 'lotspeed preset <name>'):"
+        echo "Presets (use with '<name>'):"
         echo "  normal        Balanced settings (default)"
         echo "  anti_loss     Aggressive loss recovery, fast retransmit"
         echo "  ultra_aggressive  Maximum throughput, large queues"
