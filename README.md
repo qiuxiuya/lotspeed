@@ -10,6 +10,11 @@
 
 
 
+### supported kernel
+
+* kernel_version:
+    - "6.18.2-bbrv3-patch" # LTS
+
 ### branch explanation
 
 * `merge_bl`: lotspeed merge_bl 基于学习历史记录的模式进行加速，并且洲际场景抖动不会降速避让,并且整合了BBRv3的优点。
