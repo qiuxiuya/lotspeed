@@ -12,6 +12,7 @@
 *.elf
 apx
 
+CLAUDE.md
 # Linker output
 *.ilk
 *.map
