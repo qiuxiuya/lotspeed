@@ -1,0 +1,90 @@
+name: Build Kernel Module
+
+on:
+  push:
+    branches: [ main, ml-tcp ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel_version:
+          - "6.18.2" # LTS
+          - "6.12.8"
+          - "6.11.9"
+          - "5.15.99"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev
+
+      - name: Cache kernel source
+        uses: actions/cache@v4
+        id: cache-kernel
+        with:
+          path: ~/kernel-${{ matrix.kernel_version }}
+          key: kernel-${{ matrix.kernel_version }}-v1
+
+      - name: Download and prepare kernel ${{ matrix.kernel_version }}
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          KERNEL_VERSION=${{ matrix.kernel_version }}
+          MAJOR_VERSION=$(echo $KERNEL_VERSION | cut -d. -f1)
+
+          # Download kernel source
+          if [ "$MAJOR_VERSION" = "5" ]; then
+            KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${KERNEL_VERSION}.tar.xz"
+          else
+            KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz"
+          fi
+
+          echo "Downloading kernel from: $KERNEL_URL"
+          wget -q "$KERNEL_URL" -O linux-${KERNEL_VERSION}.tar.xz
+          tar xf linux-${KERNEL_VERSION}.tar.xz
+          mv linux-${KERNEL_VERSION} ~/kernel-${KERNEL_VERSION}
+
+          # Prepare kernel headers
+          cd ~/kernel-${KERNEL_VERSION}
+          make defconfig
+          make modules_prepare
+          # Create empty Module.symvers to avoid modpost warnings
+          touch Module.symvers
+
+      - name: Build kernel module
+        run: |
+          KERNEL_VERSION=${{ matrix.kernel_version }}
+          KERNEL_DIR=~/kernel-${KERNEL_VERSION}
+
+          echo "Building for kernel $KERNEL_VERSION"
+          echo "Kernel directory: $KERNEL_DIR"
+
+          # Use KBUILD_MODPOST_WARN=1 to turn modpost errors into warnings for CI
+          make KERNEL_DIR=$KERNEL_DIR KERNEL_RELEASE=$KERNEL_VERSION KBUILD_MODPOST_WARN=1
+
+      - name: Verify build output
+        run: |
+          if [ -f lotspeed.ko ]; then
+            echo "Build successful!"
+            file lotspeed.ko
+            modinfo lotspeed.ko || true
+          else
+            echo "Build failed: lotspeed.ko not found"
+            exit 1
+          fi
+
+      - name: Upload kernel module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lotspeed-${{ matrix.kernel_version }}
+          path: lotspeed.ko
+          retention-days: 7
