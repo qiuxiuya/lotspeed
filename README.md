@@ -25,9 +25,9 @@
 
 ```bash
 # 1. install lotspeed module and helper script
-curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/refs/heads/merge_bl/install.sh | sudo bash
 #   or
-wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/merge_bl/install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/refs/heads/merge_bl/install.sh | sudo bash
 
 
 # helper
