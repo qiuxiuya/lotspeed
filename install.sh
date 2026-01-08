@@ -1185,73 +1185,97 @@ case "$1" in
         print_box_row "Uninstalling LotSpeed + NeoQ" "center" "${RED}"
         print_box_div "${RED}"
 
-        # 1. 停止 autotune 守护进程
-        print_box_row "Stopping autotune daemon..." "left" "${RED}"
+        # ========== 步骤 1: 切换到默认拥塞控制算法 ==========
+        local default_cc=$(get_default_cc)
+        print_box_row "Step 1: Switching CC to $default_cc..." "left" "${RED}"
+        sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+        sleep 1
+
+        # ========== 步骤 2: 移除 NeoQ qdiscs ==========
+        print_box_row "Step 2: Removing NeoQ qdiscs..." "left" "${RED}"
+        for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
+            tc qdisc del dev $iface root 2>/dev/null || true
+            print_kv_row "  Removed from" "$iface" "${RED}"
+        done
+        sleep 1
+
+        # ========== 步骤 3: 停止 autotune 守护进程 ==========
+        print_box_row "Step 3: Stopping autotune daemon..." "left" "${RED}"
         if [[ -f /var/run/lotspeed-autotune.pid ]]; then
             kill $(cat /var/run/lotspeed-autotune.pid) 2>/dev/null || true
             rm -f /var/run/lotspeed-autotune.pid
         fi
         pkill -f "lotspeed-autotune" 2>/dev/null || true
 
-        # 2. 停止并禁用 systemd 服务
-        print_box_row "Stopping systemd service..." "left" "${RED}"
+        # ========== 步骤 4: 停止并删除 systemd 服务 ==========
+        print_box_row "Step 4: Removing systemd service..." "left" "${RED}"
         systemctl stop lotspeed.service 2>/dev/null || true
         systemctl disable lotspeed.service 2>/dev/null || true
+        rm -f /etc/systemd/system/lotspeed.service
+        systemctl daemon-reload 2>/dev/null || true
 
-        # 3. 切换到默认拥塞控制算法
-        local default_cc=$(get_default_cc)
-        print_box_row "Switching to $default_cc..." "left" "${RED}"
-        sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+        # ========== 步骤 5: 检测 SSH 连接 ==========
+        print_box_row "Step 5: Checking SSH connections..." "left" "${RED}"
+        local ssh_using_lotspeed=0
+        local ssh_conns=$(ss -tnp 2>/dev/null | grep -E ":22\s" | grep "lotspeed" || true)
+        if [[ -n "$ssh_conns" ]]; then
+            ssh_using_lotspeed=1
+            print_box_row "${YELLOW}WARNING: SSH using lotspeed detected${NC}" "left" "${RED}"
+        fi
 
-        # 4. 移除 NeoQ qdiscs
-        print_box_row "Removing NeoQ qdiscs..." "left" "${RED}"
-        for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
-            tc qdisc del dev $iface root 2>/dev/null || true
+        # 关闭非 SSH 的 lotspeed 连接
+        print_box_row "Closing non-SSH lotspeed connections..." "left" "${RED}"
+        local closed_count=0
+        for conn in $(ss -tnp 2>/dev/null | grep "lotspeed" | grep -v ":22 " | grep -v ":22$" | awk '{print $5}'); do
+            ss -K dst "$conn" 2>/dev/null || true
+            ((closed_count++)) || true
         done
+        print_kv_row "  Connections closed" "$closed_count" "${RED}"
+        sleep 2
 
-        # 5. 创建后台卸载脚本 (SSH 安全)
-        local unload_script="/tmp/lotspeed_unload_$$.sh"
-        cat > "$unload_script" << 'UNLOAD_EOF'
-#!/bin/bash
-# LotSpeed 后台卸载脚本 - SSH 安全
-sleep 2
+        # ========== 步骤 6: 卸载内核模块 ==========
+        print_box_row "Step 6: Unloading kernel modules..." "left" "${RED}"
 
-# 关闭非 SSH 的 lotspeed 连接
-for conn in $(ss -tnp 2>/dev/null | grep "lotspeed" | grep -v ":22 " | grep -v ":22$" | awk '{print $5}'); do
-    ss -K dst "$conn" 2>/dev/null || true
-done
-sleep 1
+        local unload_failed=0
 
-# 卸载 NeoQ 模块
-retry=0
-while lsmod | grep -q "^sch_neoq " && [ $retry -lt 5 ]; do
-    rmmod sch_neoq 2>/dev/null && break
-    ((retry++))
-    sleep 2
-done
+        # 卸载 NeoQ 模块
+        if lsmod | grep -q "^sch_neoq "; then
+            local retry=0
+            while lsmod | grep -q "^sch_neoq " && [ $retry -lt 5 ]; do
+                rmmod sch_neoq 2>/dev/null && break
+                ((retry++))
+                sleep 1
+            done
+            if lsmod | grep -q "^sch_neoq "; then
+                rmmod -f sch_neoq 2>/dev/null || unload_failed=1
+            fi
+            if ! lsmod | grep -q "^sch_neoq "; then
+                print_kv_row "  sch_neoq" "${GREEN}unloaded${NC}" "${RED}"
+            else
+                print_kv_row "  sch_neoq" "${YELLOW}pending reboot${NC}" "${RED}"
+            fi
+        fi
 
-# 卸载 LotSpeed 模块
-retry=0
-while lsmod | grep -q "^lotspeed " && [ $retry -lt 10 ]; do
-    rmmod lotspeed 2>/dev/null && break
-    ((retry++))
-    sleep 2
-done
+        # 卸载 LotSpeed 模块
+        if lsmod | grep -q "^lotspeed "; then
+            local retry=0
+            while lsmod | grep -q "^lotspeed " && [ $retry -lt 5 ]; do
+                rmmod lotspeed 2>/dev/null && break
+                ((retry++))
+                sleep 1
+            done
+            if lsmod | grep -q "^lotspeed "; then
+                rmmod -f lotspeed 2>/dev/null || unload_failed=1
+            fi
+            if ! lsmod | grep -q "^lotspeed "; then
+                print_kv_row "  lotspeed" "${GREEN}unloaded${NC}" "${RED}"
+            else
+                print_kv_row "  lotspeed" "${YELLOW}pending reboot${NC}" "${RED}"
+            fi
+        fi
 
-# 强制卸载 (如果仍然失败)
-lsmod | grep -q "^lotspeed " && rmmod -f lotspeed 2>/dev/null || true
-lsmod | grep -q "^sch_neoq " && rmmod -f sch_neoq 2>/dev/null || true
-
-# 清理自身
-rm -f "$0"
-UNLOAD_EOF
-        chmod +x "$unload_script"
-
-        print_box_row "Starting background unload..." "left" "${RED}"
-        nohup "$unload_script" >/dev/null 2>&1 &
-
-        # 6. 清理文件
-        print_box_row "Cleaning up files..." "left" "${RED}"
+        # ========== 步骤 7: 清理文件 ==========
+        print_box_row "Step 7: Cleaning up files..." "left" "${RED}"
         rm -rf $INSTALL_DIR
         rm -f /etc/modules-load.d/lotspeed.conf
         rm -f /etc/modules-load.d/sch_neoq.conf
@@ -1259,17 +1283,37 @@ UNLOAD_EOF
         rm -f /lib/modules/$(uname -r)/kernel/net/sched/sch_neoq.ko
         rm -f $CONFIG_FILE
         rm -f /etc/sysctl.d/99-lotspeed.conf
-        rm -f /etc/systemd/system/lotspeed.service
         rm -f /var/log/lotspeed-autotune.log
         rm -f /tmp/lotspeed-autotune.*
         depmod -a
-        systemctl daemon-reload 2>/dev/null || true
         sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf 2>/dev/null || true
 
+        # ========== 完成提示 ==========
         print_box_div "${RED}"
-        print_box_row "${GREEN}Uninstall initiated${NC}" "center" "${RED}"
-        print_box_row "Modules unloading in background..." "center" "${RED}"
-        print_box_row "SSH connection preserved" "center" "${RED}"
+
+        # 检查是否需要重启
+        local need_reboot=0
+        if lsmod | grep -q "^lotspeed \|^sch_neoq "; then
+            need_reboot=1
+        fi
+        if [[ $ssh_using_lotspeed -eq 1 ]]; then
+            need_reboot=1
+        fi
+
+        if [[ $need_reboot -eq 1 ]]; then
+            print_box_row "${YELLOW}╔════════════════════════════════════════════╗${NC}" "center" "${RED}"
+            print_box_row "${YELLOW}║  REBOOT REQUIRED TO COMPLETE UNINSTALL     ║${NC}" "center" "${RED}"
+            print_box_row "${YELLOW}╚════════════════════════════════════════════╝${NC}" "center" "${RED}"
+            print_box_div "${RED}"
+            if [[ $ssh_using_lotspeed -eq 1 ]]; then
+                print_box_row "SSH connection is using lotspeed module" "center" "${RED}"
+            fi
+            print_box_row "Module will be fully removed after reboot" "center" "${RED}"
+            print_box_row "Run: ${CYAN}sudo reboot${NC}" "center" "${RED}"
+        else
+            print_box_row "${GREEN}Uninstall completed successfully!${NC}" "center" "${RED}"
+        fi
+
         print_box_bottom "${RED}"
 
         rm -f /usr/local/bin/lotspeed
@@ -1499,65 +1543,118 @@ MF
             if [[ -x /usr/local/bin/lotspeed ]]; then
                 /usr/local/bin/lotspeed uninstall
             else
-                # 手动卸载 (SSH 安全版本)
-                log_info "Manual uninstall (management script not found)..."
+                # 手动卸载 - 按正确顺序执行
+                print_box_top "${RED}"
+                print_box_row "Manual Uninstall" "center" "${RED}"
+                print_box_div "${RED}"
 
-                # 停止 autotune
-                pkill -f "lotspeed-autotune" 2>/dev/null || true
-                rm -f /var/run/lotspeed-autotune.pid
-
-                # 停止 systemd 服务
-                systemctl stop lotspeed.service 2>/dev/null || true
-                systemctl disable lotspeed.service 2>/dev/null || true
-
-                # 切换算法
+                # ========== 步骤 1: 切换拥塞控制算法 ==========
                 local default_cc=$(get_default_cc)
-                log_info "Switching to $default_cc..."
+                print_box_row "Step 1: Switching CC to $default_cc..." "left" "${RED}"
                 sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
+                sleep 1
 
-                # 移除 NeoQ qdiscs
+                # ========== 步骤 2: 移除 NeoQ qdiscs ==========
+                print_box_row "Step 2: Removing NeoQ qdiscs..." "left" "${RED}"
                 for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
                     tc qdisc del dev $iface root 2>/dev/null || true
                 done
+                sleep 1
 
-                # 创建后台卸载脚本
-                local unload_script="/tmp/lotspeed_unload_$$.sh"
-                cat > "$unload_script" << 'UNLOAD_MANUAL_EOF'
-#!/bin/bash
-sleep 2
-# 关闭非 SSH 连接
-for conn in $(ss -tnp 2>/dev/null | grep "lotspeed" | grep -v ":22" | awk '{print $5}'); do
-    ss -K dst "$conn" 2>/dev/null || true
-done
-sleep 1
-# 卸载模块
-for i in {1..10}; do
-    rmmod sch_neoq 2>/dev/null
-    rmmod lotspeed 2>/dev/null
-    lsmod | grep -q "lotspeed\|sch_neoq" || break
-    sleep 2
-done
-rmmod -f lotspeed 2>/dev/null || true
-rmmod -f sch_neoq 2>/dev/null || true
-rm -f "$0"
-UNLOAD_MANUAL_EOF
-                chmod +x "$unload_script"
-                nohup "$unload_script" >/dev/null 2>&1 &
+                # ========== 步骤 3: 停止 autotune ==========
+                print_box_row "Step 3: Stopping autotune daemon..." "left" "${RED}"
+                pkill -f "lotspeed-autotune" 2>/dev/null || true
+                rm -f /var/run/lotspeed-autotune.pid
 
-                # 清理文件
+                # ========== 步骤 4: 删除 systemd 服务 ==========
+                print_box_row "Step 4: Removing systemd service..." "left" "${RED}"
+                systemctl stop lotspeed.service 2>/dev/null || true
+                systemctl disable lotspeed.service 2>/dev/null || true
+                rm -f /etc/systemd/system/lotspeed.service
+                systemctl daemon-reload 2>/dev/null || true
+
+                # ========== 步骤 5: 检测 SSH 连接 ==========
+                print_box_row "Step 5: Checking SSH connections..." "left" "${RED}"
+                local ssh_using_lotspeed=0
+                local ssh_conns=$(ss -tnp 2>/dev/null | grep -E ":22\s" | grep "lotspeed" || true)
+                if [[ -n "$ssh_conns" ]]; then
+                    ssh_using_lotspeed=1
+                    print_box_row "${YELLOW}WARNING: SSH using lotspeed detected${NC}" "left" "${RED}"
+                fi
+
+                # 关闭非 SSH 连接
+                print_box_row "Closing non-SSH lotspeed connections..." "left" "${RED}"
+                for conn in $(ss -tnp 2>/dev/null | grep "lotspeed" | grep -v ":22 " | grep -v ":22$" | awk '{print $5}'); do
+                    ss -K dst "$conn" 2>/dev/null || true
+                done
+                sleep 2
+
+                # ========== 步骤 6: 卸载内核模块 ==========
+                print_box_row "Step 6: Unloading kernel modules..." "left" "${RED}"
+
+                # 卸载 NeoQ 模块
+                if lsmod | grep -q "^sch_neoq "; then
+                    local retry=0
+                    while lsmod | grep -q "^sch_neoq " && [ $retry -lt 5 ]; do
+                        rmmod sch_neoq 2>/dev/null && break
+                        ((retry++))
+                        sleep 1
+                    done
+                    lsmod | grep -q "^sch_neoq " && rmmod -f sch_neoq 2>/dev/null || true
+                fi
+
+                # 卸载 LotSpeed 模块
+                if lsmod | grep -q "^lotspeed "; then
+                    local retry=0
+                    while lsmod | grep -q "^lotspeed " && [ $retry -lt 5 ]; do
+                        rmmod lotspeed 2>/dev/null && break
+                        ((retry++))
+                        sleep 1
+                    done
+                    lsmod | grep -q "^lotspeed " && rmmod -f lotspeed 2>/dev/null || true
+                fi
+
+                # ========== 步骤 7: 清理文件 ==========
+                print_box_row "Step 7: Cleaning up files..." "left" "${RED}"
                 rm -rf $INSTALL_DIR
                 rm -f /usr/local/bin/lotspeed
-                rm -f /etc/systemd/system/lotspeed.service
                 rm -f /etc/sysctl.d/99-lotspeed.conf
                 rm -f /etc/modules-load.d/lotspeed.conf
                 rm -f /etc/modules-load.d/sch_neoq.conf
+                rm -f /lib/modules/$(uname -r)/kernel/net/ipv4/lotspeed.ko
+                rm -f /lib/modules/$(uname -r)/kernel/net/sched/sch_neoq.ko
                 rm -f $CONFIG_FILE
                 rm -f /var/log/lotspeed-autotune.log
                 rm -f /tmp/lotspeed-autotune.*
-                systemctl daemon-reload 2>/dev/null || true
                 depmod -a 2>/dev/null || true
+
+                # ========== 完成提示 ==========
+                print_box_div "${RED}"
+
+                local need_reboot=0
+                if lsmod | grep -q "^lotspeed \|^sch_neoq "; then
+                    need_reboot=1
+                fi
+                if [[ $ssh_using_lotspeed -eq 1 ]]; then
+                    need_reboot=1
+                fi
+
+                if [[ $need_reboot -eq 1 ]]; then
+                    print_box_row "${YELLOW}╔════════════════════════════════════════════╗${NC}" "center" "${RED}"
+                    print_box_row "${YELLOW}║  REBOOT REQUIRED TO COMPLETE UNINSTALL     ║${NC}" "center" "${RED}"
+                    print_box_row "${YELLOW}╚════════════════════════════════════════════╝${NC}" "center" "${RED}"
+                    print_box_div "${RED}"
+                    if [[ $ssh_using_lotspeed -eq 1 ]]; then
+                        print_box_row "SSH connection is using lotspeed module" "center" "${RED}"
+                    fi
+                    print_box_row "Module will be fully removed after reboot" "center" "${RED}"
+                    print_box_row "Run: ${CYAN}sudo reboot${NC}" "center" "${RED}"
+                else
+                    print_box_row "${GREEN}Uninstall completed successfully!${NC}" "center" "${RED}"
+                fi
+
+                print_box_bottom "${RED}"
             fi
-            log_success "Uninstall initiated! Modules unloading in background."
             ;;
         5)
             echo ""
