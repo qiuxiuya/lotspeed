@@ -216,7 +216,7 @@ check_old_modules_loaded() {
         print_box_row "  1. Run: ${CYAN}lotspeed${NC}" "left" "${YELLOW}"
         print_box_row "  2. Select option ${CYAN}7) Disable all${NC}" "left" "${YELLOW}"
         print_box_row "  3. ${RED}Reboot${NC} the system" "left" "${YELLOW}"
-        print_box_row "  4. rmmod lotspeed and sch_neoq" "left" "${YELLOW}"
+        print_box_row "  4. ${RED}rmmod lotspeed and sch_neoq${NC}" "left" "${YELLOW}"
         print_box_row "  5. Run this installer again" "left" "${YELLOW}"
         print_box_div "${YELLOW}"
 
