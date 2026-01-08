@@ -4,7 +4,9 @@ DKMS_TARBALL    ?= dkms.tar.gz
 TAR             ?= tar
 obj-m           += lotspeed.o
 
-ccflags-y := -std=gnu99
+ccflags-y := -std=gnu99 \
+	-Wno-error=int-in-bool-context \
+	-Wno-error=unused-variable
 
 .PHONY: all clean load unload
 .PHONY: .always-make
