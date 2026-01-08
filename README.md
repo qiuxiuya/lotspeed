@@ -6,6 +6,15 @@
 
 
 
+### supported kernel
+
+* kernel_version:
+  - "6.18.2" # LTS
+  - "6.12.8"
+  - "6.11.9"
+  - "5.15.99"
+
+
 ### branch explanation
 
 * `zeta-tcp`: lotspeed zeta-tcp 版本([Appex Networking zeta-tcp](https://appexnetworks.com/wp-content/uploads/2024/02/ZetaTCP-Whitepaper-V2.0.pdf))
