@@ -289,14 +289,36 @@ install_modules() {
     log_success "Modules installed"
 }
 
-# ================= 获取默认拥塞控制算法 =================
+# ================= 获取默认拥塞控制算法（排除 lotspeed）=================
 
 get_default_cc() {
-    local available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
-    if echo "$available" | grep -q "cubic"; then echo "cubic"
-    elif echo "$available" | grep -q "reno"; then echo "reno"
-    elif echo "$available" | grep -q "bbr"; then echo "bbr"
-    else echo "cubic"
+    local available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | tr ' ' '\n' | grep -v "lotspeed")
+    # 优先 bbr
+    if echo "$available" | grep -qw "bbr"; then
+        echo "bbr"
+    elif echo "$available" | grep -qw "cubic"; then
+        echo "cubic"
+    elif echo "$available" | grep -qw "reno"; then
+        echo "reno"
+    else
+        # 返回第一个可用的
+        echo "$available" | head -1
+    fi
+}
+
+# ================= 获取默认 qdisc（排除 neoq）=================
+
+get_default_qdisc() {
+    # 常见的默认 qdisc：fq_codel, pfifo_fast, fq
+    local current=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    if [[ "$current" != "neoq" && -n "$current" ]]; then
+        echo "$current"
+    elif tc qdisc help 2>&1 | grep -q "fq_codel"; then
+        echo "fq_codel"
+    elif tc qdisc help 2>&1 | grep -q "fq"; then
+        echo "fq"
+    else
+        echo "pfifo_fast"
     fi
 }
 
@@ -424,11 +446,29 @@ print_kv_row() {
 }
 
 get_default_cc() {
-    local available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
-    if echo "$available" | grep -q "cubic"; then echo "cubic"
-    elif echo "$available" | grep -q "reno"; then echo "reno"
-    elif echo "$available" | grep -q "bbr"; then echo "bbr"
-    else echo "cubic"
+    local available=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | tr ' ' '\n' | grep -v "lotspeed")
+    # 优先 bbr
+    if echo "$available" | grep -qw "bbr"; then
+        echo "bbr"
+    elif echo "$available" | grep -qw "cubic"; then
+        echo "cubic"
+    elif echo "$available" | grep -qw "reno"; then
+        echo "reno"
+    else
+        echo "$available" | head -1
+    fi
+}
+
+get_default_qdisc() {
+    local current=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    if [[ "$current" != "neoq" && -n "$current" ]]; then
+        echo "$current"
+    elif tc qdisc help 2>&1 | grep -q "fq_codel"; then
+        echo "fq_codel"
+    elif tc qdisc help 2>&1 | grep -q "fq"; then
+        echo "fq"
+    else
+        echo "pfifo_fast"
     fi
 }
 
@@ -482,7 +522,8 @@ show_status() {
     fi
 
     # NeoQ qdisc
-    local neoq_qdisc=$(tc qdisc show 2>/dev/null | grep -c "neoq" || echo "0")
+    local neoq_qdisc
+    neoq_qdisc=$(tc qdisc show 2>/dev/null | grep -c "neoq" 2>/dev/null) || neoq_qdisc=0
     if [[ "$neoq_qdisc" -gt 0 ]]; then
         print_kv_row "NeoQ Qdisc" "${GREEN}Active on $neoq_qdisc interface(s)${NC}"
     fi
@@ -1145,11 +1186,17 @@ case "$1" in
         print_box_row "Step 3: Switching CC to $default_cc..." "left" "${RED}"
         sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
 
-        # ========== 步骤 4: 移除 NeoQ qdiscs ==========
-        print_box_row "Step 4: Removing NeoQ qdiscs..." "left" "${RED}"
+        # ========== 步骤 4: 还原 qdisc 到默认值 ==========
+        print_box_row "Step 4: Restoring default qdisc..." "left" "${RED}"
+        local default_qdisc=$(get_default_qdisc)
         for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
+            tc qdisc replace dev $iface root $default_qdisc 2>/dev/null || \
             tc qdisc del dev $iface root 2>/dev/null || true
         done
+        # 还原系统默认 qdisc 设置
+        if [[ -n "$default_qdisc" ]]; then
+            sysctl -w net.core.default_qdisc=$default_qdisc >/dev/null 2>&1 || true
+        fi
 
         # ========== 步骤 5: 强制卸载内核模块 ==========
         print_box_row "Step 5: Force unloading kernel modules..." "left" "${RED}"
@@ -1158,25 +1205,47 @@ case "$1" in
 
         # ========== 步骤 6: 清理所有文件 ==========
         print_box_row "Step 6: Cleaning up all files..." "left" "${RED}"
+        # 清理管理工具
         rm -f /usr/local/bin/lotspeed
+        # 清理源码和编译目录
         rm -rf $INSTALL_DIR
+        # 清理模块加载配置
         rm -f /etc/modules-load.d/lotspeed.conf
         rm -f /etc/modules-load.d/sch_neoq.conf
+        # 清理 sysctl 配置
         rm -f $CONFIG_FILE
         rm -f /etc/sysctl.d/99-lotspeed.conf
-        rm -f /lib/modules/$(uname -r)/kernel/net/ipv4/lotspeed.ko
-        rm -f /lib/modules/$(uname -r)/kernel/net/sched/sch_neoq.ko
+        sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf 2>/dev/null || true
+        sed -i '/net.core.default_qdisc=neoq/d' /etc/sysctl.conf 2>/dev/null || true
+        # 清理内核模块文件（所有内核版本）
+        rm -f /lib/modules/*/kernel/net/ipv4/lotspeed.ko 2>/dev/null || true
+        rm -f /lib/modules/*/kernel/net/sched/sch_neoq.ko 2>/dev/null || true
+        rm -f /lib/modules/*/extra/lotspeed.ko 2>/dev/null || true
+        rm -f /lib/modules/*/extra/sch_neoq.ko 2>/dev/null || true
+        # 清理日志和临时文件
         rm -f /var/log/lotspeed-autotune.log
         rm -f /tmp/lotspeed-autotune.*
-        sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf 2>/dev/null || true
+        rm -f /var/log/lotspeed_install.log
+        # 更新模块依赖
         depmod -a 2>/dev/null || true
 
         # ========== 完成提示 ==========
         print_box_div "${RED}"
         print_box_row "${GREEN}Uninstall completed!${NC}" "center" "${RED}"
         print_box_div "${RED}"
-        print_box_row "${YELLOW}Please reboot to fully remove kernel modules${NC}" "center" "${RED}"
-        print_box_row "Run: ${CYAN}sudo reboot${NC}" "center" "${RED}"
+
+        # 检查模块是否仍然加载
+        if lsmod | grep -qE "^lotspeed |^sch_neoq "; then
+            print_box_row "${YELLOW}Kernel modules still loaded, reboot required${NC}" "center" "${RED}"
+            print_box_div "${RED}"
+            print_box_row "After reboot, run to verify cleanup:" "left" "${RED}"
+            print_box_row "${CYAN}sudo rm -f /lib/modules/\$(uname -r)/kernel/net/ipv4/lotspeed.ko${NC}" "left" "${RED}"
+            print_box_row "${CYAN}sudo rm -f /lib/modules/\$(uname -r)/kernel/net/sched/sch_neoq.ko${NC}" "left" "${RED}"
+            print_box_row "${CYAN}sudo depmod -a${NC}" "left" "${RED}"
+        else
+            print_box_row "${GREEN}All modules unloaded successfully${NC}" "center" "${RED}"
+        fi
+
         print_box_bottom "${RED}"
         ;;
     help|--help|-h)
@@ -1426,11 +1495,16 @@ MF
                 print_box_row "Step 3: Switching CC to $default_cc..." "left" "${RED}"
                 sysctl -w net.ipv4.tcp_congestion_control=$default_cc >/dev/null 2>&1
 
-                # ========== 步骤 4: 移除 NeoQ qdiscs ==========
-                print_box_row "Step 4: Removing NeoQ qdiscs..." "left" "${RED}"
+                # ========== 步骤 4: 还原 qdisc 到默认值 ==========
+                print_box_row "Step 4: Restoring default qdisc..." "left" "${RED}"
+                local default_qdisc=$(get_default_qdisc)
                 for iface in $(tc qdisc show 2>/dev/null | grep neoq | awk '{print $5}'); do
+                    tc qdisc replace dev $iface root $default_qdisc 2>/dev/null || \
                     tc qdisc del dev $iface root 2>/dev/null || true
                 done
+                if [[ -n "$default_qdisc" ]]; then
+                    sysctl -w net.core.default_qdisc=$default_qdisc >/dev/null 2>&1 || true
+                fi
 
                 # ========== 步骤 5: 强制卸载内核模块 ==========
                 print_box_row "Step 5: Force unloading kernel modules..." "left" "${RED}"
@@ -1445,19 +1519,33 @@ MF
                 rm -f /etc/modules-load.d/sch_neoq.conf
                 rm -f $CONFIG_FILE
                 rm -f /etc/sysctl.d/99-lotspeed.conf
-                rm -f /lib/modules/$(uname -r)/kernel/net/ipv4/lotspeed.ko
-                rm -f /lib/modules/$(uname -r)/kernel/net/sched/sch_neoq.ko
+                sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf 2>/dev/null || true
+                sed -i '/net.core.default_qdisc=neoq/d' /etc/sysctl.conf 2>/dev/null || true
+                rm -f /lib/modules/*/kernel/net/ipv4/lotspeed.ko 2>/dev/null || true
+                rm -f /lib/modules/*/kernel/net/sched/sch_neoq.ko 2>/dev/null || true
+                rm -f /lib/modules/*/extra/lotspeed.ko 2>/dev/null || true
+                rm -f /lib/modules/*/extra/sch_neoq.ko 2>/dev/null || true
                 rm -f /var/log/lotspeed-autotune.log
                 rm -f /tmp/lotspeed-autotune.*
-                sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf 2>/dev/null || true
+                rm -f /var/log/lotspeed_install.log
                 depmod -a 2>/dev/null || true
 
                 # ========== 完成提示 ==========
                 print_box_div "${RED}"
                 print_box_row "${GREEN}Uninstall completed!${NC}" "center" "${RED}"
                 print_box_div "${RED}"
-                print_box_row "${YELLOW}Please reboot to fully remove kernel modules${NC}" "center" "${RED}"
-                print_box_row "Run: ${CYAN}sudo reboot${NC}" "center" "${RED}"
+
+                if lsmod | grep -qE "^lotspeed |^sch_neoq "; then
+                    print_box_row "${YELLOW}Kernel modules still loaded, reboot required${NC}" "center" "${RED}"
+                    print_box_div "${RED}"
+                    print_box_row "After reboot, run to verify cleanup:" "left" "${RED}"
+                    print_box_row "${CYAN}sudo rm -f /lib/modules/\$(uname -r)/kernel/net/ipv4/lotspeed.ko${NC}" "left" "${RED}"
+                    print_box_row "${CYAN}sudo rm -f /lib/modules/\$(uname -r)/kernel/net/sched/sch_neoq.ko${NC}" "left" "${RED}"
+                    print_box_row "${CYAN}sudo depmod -a${NC}" "left" "${RED}"
+                else
+                    print_box_row "${GREEN}All modules unloaded successfully${NC}" "center" "${RED}"
+                fi
+
                 print_box_bottom "${RED}"
             fi
             ;;
