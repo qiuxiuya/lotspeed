@@ -6,7 +6,10 @@ obj-m           += lotspeed.o
 obj-m           += sch_neoq.o
 sch_neoq-objs   := qdisc_newneo.o
 
-ccflags-y := -std=gnu99 -DCONFIG_NET_SCH_DEFAULT
+ccflags-y := -std=gnu99 -DCONFIG_NET_SCH_DEFAULT \
+	-Wno-error=int-in-bool-context \
+	-Wno-error=unused-variable \
+	-Wno-error=unused-function
 
 .PHONY: all clean load unload load-neoq unload-neoq v1 install-neoq neoq-status
 .PHONY: .always-make
