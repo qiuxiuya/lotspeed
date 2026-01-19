@@ -266,3 +266,13 @@ $RECYCLE.BIN/
 
 /dkms.conf
 /dkms.tar.gz
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# MDP 数据目录
+mdp_data/
