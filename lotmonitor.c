@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * LotMonitor - TCP Connection Monitor for MDP Training
+ * LotMonitor - TCP Connection Monitor with rwnd Control
  *
- * 用于马尔可夫决策过程(MDP)拥塞控制训练的数据采集模块
+ * 智能 TCP 拥塞控制系统:
+ *   - 使用 Netfilter 监控 TCP 连接指标
+ *   - 使用 Python MDP 模型进行训练
+ *   - 通过 rwnd 修改实现实时拥塞控制
  *
  * 采集的状态(State)向量:
  *   - RTT 相关: min_rtt, curr_rtt, srtt, rtt_var, queue_delay
@@ -10,10 +13,16 @@
  *   - 吞吐相关: throughput, packets_sent, packets_acked
  *   - 时序相关: inter_arrival_time, ack_interval
  *
- * 数据输出:
+ * 控制机制:
+ *   - 通过 /proc/lotmonitor/control 接收用户空间的 rwnd 调整指令
+ *   - 在 LOCAL_OUT hook 中修改 ACK 包的窗口字段
+ *   - effective_window = min(cwnd, rwnd)，降低 rwnd 可限制发送速率
+ *
+ * 接口:
  *   - /proc/lotmonitor/stats    - 全局统计
  *   - /proc/lotmonitor/conns    - 连接列表
  *   - /proc/lotmonitor/samples  - 时序样本 (用于训练)
+ *   - /proc/lotmonitor/control  - 控制接口 (写入 rwnd 调整)
  *
  * Copyright (C) 2024 LotSpeed Team
  */
@@ -38,8 +47,9 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/circ_buf.h>
+#include <net/checksum.h>
 
-#define LOTMON_VERSION		"1.0.0"
+#define LOTMON_VERSION		"2.0.0"
 
 /* 配置常量 */
 #define CONN_HASH_BITS		12
@@ -49,14 +59,28 @@
 #define SAMPLE_BUFFER_SIZE	4096
 #define SAMPLE_BUFFER_MASK	(SAMPLE_BUFFER_SIZE - 1)
 
+/* 控制指令缓冲区 */
+#define CONTROL_BUFFER_SIZE	256
+
+/* rwnd 控制范围 */
+#define RWND_MIN		1460	/* 最小 rwnd (1 MSS) */
+#define RWND_MAX		65535	/* 最大 rwnd */
+#define RWND_DEFAULT		65535	/* 默认不限制 */
+
 /* 采样间隔 (毫秒) */
 static unsigned int sample_interval_ms = 100;
+
+/* 是否启用 rwnd 控制 */
+static bool control_enabled;
 
 /* 模块参数 */
 static bool debug_mode;
 
 module_param(sample_interval_ms, uint, 0644);
 MODULE_PARM_DESC(sample_interval_ms, "Sample interval in milliseconds");
+
+module_param(control_enabled, bool, 0644);
+MODULE_PARM_DESC(control_enabled, "Enable rwnd control");
 
 module_param(debug_mode, bool, 0644);
 MODULE_PARM_DESC(debug_mode, "Enable debug logging");
@@ -164,6 +188,11 @@ struct lotmon_conn {
 	/* 窗口 */
 	u16			peer_rwnd;	/* 对方通告窗口 */
 
+	/* rwnd 控制 (MDP action) */
+	u16			target_rwnd;	/* 目标 rwnd (由用户空间设置) */
+	bool			rwnd_modified;	/* 是否修改了 rwnd */
+	u32			control_count;	/* 控制次数统计 */
+
 	/* 状态 */
 	unsigned long		last_active;
 	unsigned long		last_sample;	/* 上次采样时间 */
@@ -193,6 +222,8 @@ static atomic64_t stat_tx_packets;
 static atomic64_t stat_active_conns;
 static atomic64_t stat_total_samples;
 static atomic64_t stat_dropped_samples;	/* 缓冲区满时丢弃的样本 */
+static atomic64_t stat_rwnd_controls;	/* rwnd 修改次数 */
+static atomic64_t stat_control_cmds;	/* 收到的控制指令数 */
 
 /* 序号比较宏 */
 #define seq_before(a, b)	((s32)((a) - (b)) < 0)
@@ -244,9 +275,12 @@ static void conn_rcu_free(struct rcu_head *head)
 
 /**
  * create_conn - 创建新连接
+ * @is_outgoing: true 表示我们是客户端发起连接，false 表示我们是服务端
+ * @init_seq: 对于客户端是我们的初始序号，对于服务端暂时为0
  */
 static struct lotmon_conn *create_conn(__be32 saddr, __be32 daddr,
-				       __be16 sport, __be16 dport)
+				       __be16 sport, __be16 dport,
+				       u32 init_seq, bool is_outgoing)
 {
 	struct lotmon_conn *conn;
 	u32 hash;
@@ -260,12 +294,30 @@ static struct lotmon_conn *create_conn(__be32 saddr, __be32 daddr,
 	conn->sport = sport;
 	conn->dport = dport;
 
+	if (is_outgoing) {
+		/* 客户端: 我们发送 SYN，init_seq 是我们的序号 */
+		conn->snd_una = init_seq;
+		conn->snd_nxt = init_seq + 1;
+		conn->rtt_stamp = ktime_get();  /* 开始 RTT 计时 */
+		conn->rtt_seq = init_seq + 1;
+	} else {
+		/* 服务端: 收到 SYN，我们的序号要等 SYN-ACK 时才知道 */
+		conn->snd_una = 0;
+		conn->snd_nxt = 0;
+		conn->rtt_stamp = 0;  /* 等待 SYN-ACK 时开始计时 */
+		conn->rtt_seq = 0;
+	}
+
 	/* RTT 初始化 */
 	conn->min_rtt_us = U32_MAX;
 	conn->curr_rtt_us = 0;
 	conn->srtt_us = 0;
 	conn->rtt_var_us = 0;
-	conn->rtt_stamp = 0;
+
+	/* rwnd 控制初始化 */
+	conn->target_rwnd = RWND_DEFAULT;  /* 默认不限制 */
+	conn->rwnd_modified = false;
+	conn->control_count = 0;
 
 	conn->last_active = jiffies;
 	conn->last_sample = jiffies;
@@ -283,8 +335,9 @@ static struct lotmon_conn *create_conn(__be32 saddr, __be32 daddr,
 	atomic64_inc(&stat_active_conns);
 
 	if (debug_mode)
-		pr_info("lotmonitor: new conn %pI4:%u -> %pI4:%u\n",
-			&saddr, ntohs(sport), &daddr, ntohs(dport));
+		pr_info("lotmonitor: new conn %pI4:%u -> %pI4:%u seq=%u %s\n",
+			&saddr, ntohs(sport), &daddr, ntohs(dport), init_seq,
+			is_outgoing ? "client" : "server");
 
 	return conn;
 }
@@ -485,11 +538,12 @@ static unsigned int lotmon_in_hook(void *priv, struct sk_buff *skb,
 	/* 查找连接 (入站包: 目的是本机) */
 	conn = find_conn(iph->daddr, iph->saddr, th->dest, th->source);
 
-	/* SYN 包 - 创建连接 */
+	/* SYN 包 - 创建连接 (我们是服务端) */
 	if (th->syn && !th->ack) {
-		if (!conn)
-			create_conn(iph->daddr, iph->saddr,
-				    th->dest, th->source);
+		if (!conn) {
+			conn = create_conn(iph->daddr, iph->saddr,
+					   th->dest, th->source, 0, false);
+		}
 		goto out;
 	}
 
@@ -510,6 +564,12 @@ static unsigned int lotmon_in_hook(void *priv, struct sk_buff *skb,
 
 		/* 记录对方的接收窗口 */
 		conn->peer_rwnd = ntohs(th->window);
+
+		/* 跳过未初始化的服务端连接 (等待 SYN-ACK) */
+		if (conn->snd_una == 0 && conn->snd_nxt == 0) {
+			spin_unlock_bh(&conn->lock);
+			goto out;
+		}
 
 		if (seq_after(ack_seq, conn->snd_una)) {
 			u32 acked = ack_seq - conn->snd_una;
@@ -568,7 +628,11 @@ out:
 }
 
 /**
- * lotmon_out_hook - LOCAL_OUT hook (监控出站)
+ * lotmon_out_hook - LOCAL_OUT hook (监控出站 + rwnd 控制)
+ *
+ * 这个 hook 处理两个功能:
+ * 1. 监控出站包，更新连接状态
+ * 2. 当启用控制时，修改 ACK 包的 window 字段
  */
 static unsigned int lotmon_out_hook(void *priv, struct sk_buff *skb,
 				    const struct nf_hook_state *state)
@@ -579,6 +643,7 @@ static unsigned int lotmon_out_hook(void *priv, struct sk_buff *skb,
 	unsigned int thoff;
 	u32 seq;
 	u16 payload_len;
+	u16 old_win, new_win;
 	ktime_t now;
 
 	if (!skb)
@@ -599,11 +664,32 @@ static unsigned int lotmon_out_hook(void *priv, struct sk_buff *skb,
 	/* 查找连接 (出站包: 源是本机) */
 	conn = find_conn(iph->saddr, iph->daddr, th->source, th->dest);
 
-	/* SYN 包 - 创建连接 */
-	if (th->syn && !th->ack) {
-		if (!conn)
-			create_conn(iph->saddr, iph->daddr,
-				    th->source, th->dest);
+	/* SYN 包处理 */
+	if (th->syn) {
+		if (!th->ack) {
+			/* 纯 SYN - 我们是客户端发起连接 */
+			if (!conn) {
+				u32 our_seq = ntohl(th->seq);
+				conn = create_conn(iph->saddr, iph->daddr,
+						   th->source, th->dest,
+						   our_seq, true);
+			}
+		} else {
+			/* SYN-ACK - 我们是服务端响应连接 */
+			if (conn && conn->snd_una == 0) {
+				u32 our_seq = ntohl(th->seq);
+				spin_lock_bh(&conn->lock);
+				conn->snd_una = our_seq;
+				conn->snd_nxt = our_seq + 1;
+				conn->rtt_stamp = ktime_get();
+				conn->rtt_seq = our_seq + 1;
+				spin_unlock_bh(&conn->lock);
+
+				if (debug_mode)
+					pr_info("lotmonitor: server SYN-ACK seq=%u\n",
+						our_seq);
+			}
+		}
 		goto out;
 	}
 
@@ -615,6 +701,54 @@ static unsigned int lotmon_out_hook(void *priv, struct sk_buff *skb,
 		delete_conn(conn);
 		goto out;
 	}
+
+	/*
+	 * ==================================================================
+	 * rwnd 控制: 修改出站 ACK 包的窗口字段
+	 * ==================================================================
+	 * 当 control_enabled 且连接有 target_rwnd 设置时，修改窗口
+	 * 这样可以间接控制对方的发送速率:
+	 *   effective_window = min(cwnd, rwnd)
+	 */
+	if (control_enabled && th->ack && !th->syn &&
+	    conn->target_rwnd < RWND_DEFAULT) {
+		old_win = ntohs(th->window);
+		new_win = conn->target_rwnd;
+
+		/* 只在需要减小窗口时修改 */
+		if (new_win < old_win) {
+			/* 确保 skb 可写 */
+			if (skb_ensure_writable(skb, thoff + sizeof(struct tcphdr))) {
+				/* 无法修改，跳过 */
+				goto skip_control;
+			}
+
+			/* 重新获取头部指针 (skb 可能被复制) */
+			iph = ip_hdr(skb);
+			th = (struct tcphdr *)((u8 *)iph + thoff);
+
+			/* 修改窗口字段 */
+			th->window = htons(new_win);
+
+			/* 重新计算 TCP 校验和 */
+			th->check = 0;
+			th->check = tcp_v4_check(
+				ntohs(iph->tot_len) - thoff,
+				iph->saddr, iph->daddr,
+				csum_partial(th, ntohs(iph->tot_len) - thoff, 0));
+
+			/* 更新统计 */
+			conn->rwnd_modified = true;
+			conn->control_count++;
+			atomic64_inc(&stat_rwnd_controls);
+
+			if (debug_mode && (conn->control_count % 100 == 1))
+				pr_info("lotmonitor: rwnd %u->%u for %pI4:%u\n",
+					old_win, new_win,
+					&conn->daddr, ntohs(conn->dport));
+		}
+	}
+skip_control:
 
 	/* 更新发送序号 */
 	if (!th->syn && payload_len > 0) {
@@ -713,9 +847,12 @@ static void sample_timer_fn(struct timer_list *t)
 
 	rcu_read_lock();
 	hash_for_each_rcu(conn_table, bkt, conn, node) {
-		if (time_after(jiffies, conn->last_sample +
-			       msecs_to_jiffies(sample_interval_ms))) {
-			collect_sample(conn, EVENT_NONE);
+		/* 只采样有有效数据的连接 */
+		if (conn->curr_rtt_us > 0 || conn->total_packets > 10) {
+			if (time_after(jiffies, conn->last_sample +
+				       msecs_to_jiffies(sample_interval_ms))) {
+				collect_sample(conn, EVENT_NONE);
+			}
 		}
 	}
 	rcu_read_unlock();
@@ -783,6 +920,12 @@ static int stats_show(struct seq_file *m, void *v)
 	seq_printf(m, "Buffer Size:        %d\n", SAMPLE_BUFFER_SIZE);
 	seq_printf(m, "Buffer Used:        %u\n",
 		   (sample_buf.head - sample_buf.tail) & SAMPLE_BUFFER_MASK);
+	seq_puts(m, "-------------------------------------\n");
+	seq_printf(m, "Control Enabled:    %s\n", control_enabled ? "yes" : "no");
+	seq_printf(m, "Control Commands:   %lld\n",
+		   atomic64_read(&stat_control_cmds));
+	seq_printf(m, "rwnd Modifications: %lld\n",
+		   atomic64_read(&stat_rwnd_controls));
 
 	return 0;
 }
@@ -903,6 +1046,180 @@ static const struct proc_ops samples_proc_ops = {
 	.proc_release	= single_release,
 };
 
+/*
+ * /proc/lotmonitor/control - 控制接口
+ *
+ * 写入格式:
+ *   enable            - 启用 rwnd 控制
+ *   disable           - 禁用 rwnd 控制
+ *   <ip>:<port>=<rwnd> - 设置特定连接的目标 rwnd
+ *   reset             - 重置所有连接的 rwnd 为默认值
+ *
+ * 示例:
+ *   echo "enable" > /proc/lotmonitor/control
+ *   echo "192.168.1.1:8080=32768" > /proc/lotmonitor/control
+ *   echo "disable" > /proc/lotmonitor/control
+ */
+static ssize_t control_write(struct file *file, const char __user *buf,
+			     size_t count, loff_t *ppos)
+{
+	char kbuf[CONTROL_BUFFER_SIZE];
+	char *line, *p;
+	size_t len;
+	unsigned int ip[4], port, rwnd;
+	__be32 daddr;
+	__be16 dport;
+	struct lotmon_conn *conn;
+	int bkt;
+
+	if (count >= CONTROL_BUFFER_SIZE)
+		return -EINVAL;
+
+	len = min(count, sizeof(kbuf) - 1);
+	if (copy_from_user(kbuf, buf, len))
+		return -EFAULT;
+
+	kbuf[len] = '\0';
+	line = kbuf;
+
+	/* 去除换行符 */
+	p = strchr(line, '\n');
+	if (p)
+		*p = '\0';
+
+	atomic64_inc(&stat_control_cmds);
+
+	/* 解析命令 */
+	if (strcmp(line, "enable") == 0) {
+		control_enabled = true;
+		pr_info("lotmonitor: rwnd control enabled\n");
+		return count;
+	}
+
+	if (strcmp(line, "disable") == 0) {
+		control_enabled = false;
+		pr_info("lotmonitor: rwnd control disabled\n");
+		return count;
+	}
+
+	if (strcmp(line, "reset") == 0) {
+		/* 重置所有连接的 rwnd */
+		rcu_read_lock();
+		hash_for_each_rcu(conn_table, bkt, conn, node) {
+			spin_lock_bh(&conn->lock);
+			conn->target_rwnd = RWND_DEFAULT;
+			conn->rwnd_modified = false;
+			spin_unlock_bh(&conn->lock);
+		}
+		rcu_read_unlock();
+		pr_info("lotmonitor: all rwnd reset to default\n");
+		return count;
+	}
+
+	/* 解析 IP:port=rwnd 格式 */
+	if (sscanf(line, "%u.%u.%u.%u:%u=%u",
+		   &ip[0], &ip[1], &ip[2], &ip[3], &port, &rwnd) == 6) {
+		/* 验证参数 */
+		if (ip[0] > 255 || ip[1] > 255 || ip[2] > 255 || ip[3] > 255 ||
+		    port > 65535 || rwnd > RWND_MAX) {
+			pr_warn("lotmonitor: invalid parameters\n");
+			return -EINVAL;
+		}
+
+		/* 限制最小 rwnd */
+		if (rwnd < RWND_MIN)
+			rwnd = RWND_MIN;
+
+		daddr = htonl((ip[0] << 24) | (ip[1] << 16) |
+			      (ip[2] << 8) | ip[3]);
+		dport = htons(port);
+
+		/* 查找匹配的连接 (按目标地址匹配) */
+		rcu_read_lock();
+		hash_for_each_rcu(conn_table, bkt, conn, node) {
+			if (conn->daddr == daddr && conn->dport == dport) {
+				spin_lock_bh(&conn->lock);
+				conn->target_rwnd = rwnd;
+				spin_unlock_bh(&conn->lock);
+
+				if (debug_mode)
+					pr_info("lotmonitor: set rwnd=%u for %pI4:%u\n",
+						rwnd, &daddr, port);
+			}
+		}
+		rcu_read_unlock();
+
+		return count;
+	}
+
+	/* 解析 all=rwnd 格式 (设置所有连接) */
+	if (sscanf(line, "all=%u", &rwnd) == 1) {
+		if (rwnd > RWND_MAX)
+			rwnd = RWND_MAX;
+		if (rwnd < RWND_MIN)
+			rwnd = RWND_MIN;
+
+		rcu_read_lock();
+		hash_for_each_rcu(conn_table, bkt, conn, node) {
+			spin_lock_bh(&conn->lock);
+			conn->target_rwnd = rwnd;
+			spin_unlock_bh(&conn->lock);
+		}
+		rcu_read_unlock();
+
+		pr_info("lotmonitor: set all rwnd to %u\n", rwnd);
+		return count;
+	}
+
+	pr_warn("lotmonitor: unknown command: %s\n", line);
+	return -EINVAL;
+}
+
+static int control_show(struct seq_file *m, void *v)
+{
+	struct lotmon_conn *conn;
+	int bkt;
+
+	seq_puts(m, "# LotMonitor Control Interface\n");
+	seq_puts(m, "# Commands:\n");
+	seq_puts(m, "#   enable          - Enable rwnd control\n");
+	seq_puts(m, "#   disable         - Disable rwnd control\n");
+	seq_puts(m, "#   <ip>:<port>=<rwnd> - Set rwnd for connection\n");
+	seq_puts(m, "#   all=<rwnd>      - Set rwnd for all connections\n");
+	seq_puts(m, "#   reset           - Reset all rwnd to default\n");
+	seq_puts(m, "#\n");
+	seq_printf(m, "# Status: %s\n", control_enabled ? "ENABLED" : "DISABLED");
+	seq_puts(m, "#\n");
+	seq_puts(m, "# Active connections with rwnd control:\n");
+	seq_puts(m, "# daddr,dport,target_rwnd,peer_rwnd,control_count\n");
+
+	rcu_read_lock();
+	hash_for_each_rcu(conn_table, bkt, conn, node) {
+		if (conn->target_rwnd < RWND_DEFAULT || conn->rwnd_modified) {
+			seq_printf(m, "%pI4,%u,%u,%u,%u\n",
+				   &conn->daddr, ntohs(conn->dport),
+				   conn->target_rwnd, conn->peer_rwnd,
+				   conn->control_count);
+		}
+	}
+	rcu_read_unlock();
+
+	return 0;
+}
+
+static int control_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, control_show, NULL);
+}
+
+static const struct proc_ops control_proc_ops = {
+	.proc_open	= control_open,
+	.proc_read	= seq_read,
+	.proc_write	= control_write,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+};
+
 static struct proc_dir_entry *proc_dir;
 
 static int __init lotmon_init(void)
@@ -924,6 +1241,8 @@ static int __init lotmon_init(void)
 	atomic64_set(&stat_active_conns, 0);
 	atomic64_set(&stat_total_samples, 0);
 	atomic64_set(&stat_dropped_samples, 0);
+	atomic64_set(&stat_rwnd_controls, 0);
+	atomic64_set(&stat_control_cmds, 0);
 
 	/* 注册 Netfilter hooks */
 	ret = nf_register_net_hooks(&init_net, lotmon_hooks,
@@ -946,9 +1265,11 @@ static int __init lotmon_init(void)
 		proc_create("stats", 0444, proc_dir, &stats_proc_ops);
 		proc_create("conns", 0444, proc_dir, &conns_proc_ops);
 		proc_create("samples", 0444, proc_dir, &samples_proc_ops);
+		proc_create("control", 0644, proc_dir, &control_proc_ops);
 	}
 
 	pr_info("lotmonitor: initialized successfully\n");
+	pr_info("lotmonitor: control interface at /proc/lotmonitor/control\n");
 	return 0;
 }
 
@@ -962,6 +1283,7 @@ static void __exit lotmon_exit(void)
 
 	/* 移除 /proc 接口 */
 	if (proc_dir) {
+		remove_proc_entry("control", proc_dir);
 		remove_proc_entry("samples", proc_dir);
 		remove_proc_entry("conns", proc_dir);
 		remove_proc_entry("stats", proc_dir);
@@ -996,5 +1318,5 @@ module_exit(lotmon_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("LotSpeed Team");
-MODULE_DESCRIPTION("TCP Connection Monitor for MDP Training");
+MODULE_DESCRIPTION("TCP Connection Monitor with rwnd Control for MDP-based Congestion Control");
 MODULE_VERSION(LOTMON_VERSION);
