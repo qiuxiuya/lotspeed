@@ -18,6 +18,12 @@ MODULE_NAME="lotspeed"
 VERSION="5.6"
 CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 CURRENT_USER=$(whoami)
+ACTION="${1:-install}"
+MAKE_ARGS=()
+KERNEL_CONFIG=""
+KERNEL_USES_LLVM=0
+KERNEL_CLANG_MAJOR=""
+LLVM_MAKE_VALUE="1"
 
 # ================= 颜色定义 =================
 RED='\033[0;31m'
@@ -187,23 +193,135 @@ check_system() {
     log_success "System: $OS $OS_VERSION (kernel $(uname -r), $ARCH)"
 }
 
+detect_kernel_build_toolchain() {
+    local kernel_build_dir="/lib/modules/$(uname -r)/build"
+    local clang_version_num=""
+
+    KERNEL_CONFIG=""
+    KERNEL_USES_LLVM=0
+    KERNEL_CLANG_MAJOR=""
+    LLVM_MAKE_VALUE="1"
+    MAKE_ARGS=()
+
+    if [[ -f "$kernel_build_dir/.config" ]]; then
+        KERNEL_CONFIG="$kernel_build_dir/.config"
+    elif [[ -f "/boot/config-$(uname -r)" ]]; then
+        KERNEL_CONFIG="/boot/config-$(uname -r)"
+    fi
+
+    if [[ -n "$KERNEL_CONFIG" ]] && grep -q '^CONFIG_CC_IS_CLANG=y' "$KERNEL_CONFIG"; then
+        KERNEL_USES_LLVM=1
+
+        if grep -q '^CONFIG_CLANG_VERSION=' "$KERNEL_CONFIG"; then
+            clang_version_num=$(grep '^CONFIG_CLANG_VERSION=' "$KERNEL_CONFIG" | cut -d= -f2)
+            if [[ "$clang_version_num" =~ ^[0-9]+$ ]]; then
+                KERNEL_CLANG_MAJOR=$((clang_version_num / 10000))
+            fi
+        fi
+
+        if [[ -z "$KERNEL_CLANG_MAJOR" ]] && [[ -r /proc/version ]]; then
+            KERNEL_CLANG_MAJOR=$(sed -n 's/.*clang version \([0-9][0-9]*\)\..*/\1/p' /proc/version | head -n1)
+        fi
+
+        if [[ -n "$KERNEL_CLANG_MAJOR" ]]; then
+            LLVM_MAKE_VALUE="-$KERNEL_CLANG_MAJOR"
+            MAKE_ARGS+=(LLVM="$LLVM_MAKE_VALUE")
+            log_info "Detected clang-built kernel from $KERNEL_CONFIG (clang major: $KERNEL_CLANG_MAJOR)"
+        else
+            MAKE_ARGS+=(LLVM=1)a
+            log_info "Detected clang-built kernel from $KERNEL_CONFIG (clang version not detected, using generic LLVM=1)"
+        fi
+    elif [[ -n "$KERNEL_CONFIG" ]]; then
+        log_info "Detected gcc-built kernel from $KERNEL_CONFIG"
+    else
+        log_warn "Kernel config not found, falling back to default gcc toolchain"
+    fi
+}
+
 install_dependencies() {
     log_info "Installing dependencies..."
 
     if [[ "$OS" == "centos" ]]; then
-        yum install -y gcc make kernel-devel-$(uname -r) kernel-headers-$(uname -r) wget curl bc 2>/dev/null || {
-            log_warn "Some packages may be missing, trying alternative..."
-            yum install -y gcc make kernel-devel kernel-headers wget curl bc
-        }
+        if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
+            yum install -y gcc make clang llvm lld kernel-devel-$(uname -r) kernel-headers-$(uname -r) wget curl bc 2>/dev/null || {
+                log_warn "Some packages may be missing, trying alternative..."
+                yum install -y gcc make clang llvm kernel-devel kernel-headers wget curl bc
+            }
+        else
+            yum install -y gcc make kernel-devel-$(uname -r) kernel-headers-$(uname -r) wget curl bc 2>/dev/null || {
+                log_warn "Some packages may be missing, trying alternative..."
+                yum install -y gcc make kernel-devel kernel-headers wget curl bc
+            }
+        fi
     elif [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
         apt-get update >/dev/null 2>&1
-        apt-get install -y gcc make linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
-            log_warn "Some packages may be missing, trying alternative..."
-            apt-get install -y gcc make linux-headers-generic wget curl bc
-        }
+        if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
+            if [[ -n "$KERNEL_CLANG_MAJOR" ]]; then
+                apt-get install -y gcc make clang-$KERNEL_CLANG_MAJOR llvm-$KERNEL_CLANG_MAJOR lld-$KERNEL_CLANG_MAJOR linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
+                    log_warn "Versioned clang toolchain not found, trying generic clang packages..."
+                    apt-get install -y gcc make clang llvm lld linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
+                        log_warn "Some packages may be missing, trying alternative..."
+                        apt-get install -y gcc make clang llvm lld linux-headers-generic wget curl bc
+                    }
+                }
+            else
+                apt-get install -y gcc make clang llvm lld linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
+                    log_warn "Some packages may be missing, trying alternative..."
+                    apt-get install -y gcc make clang llvm lld linux-headers-generic wget curl bc
+                }
+            fi
+        else
+            apt-get install -y gcc make linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
+                log_warn "Some packages may be missing, trying alternative..."
+                apt-get install -y gcc make linux-headers-generic wget curl bc
+            }
+        fi
     fi
 
     log_success "Dependencies installed"
+}
+
+uninstall_dependencies() {
+    log_info "Removing installed build dependencies..."
+
+    if [[ "$OS" == "centos" ]]; then
+        if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
+            yum remove -y gcc make clang llvm lld kernel-devel-$(uname -r) kernel-headers-$(uname -r) bc 2>/dev/null || {
+                log_warn "Version-specific packages may be missing, trying generic package names..."
+                yum remove -y gcc make clang llvm lld kernel-devel kernel-headers bc || true
+            }
+        else
+            yum remove -y gcc make kernel-devel-$(uname -r) kernel-headers-$(uname -r) bc 2>/dev/null || {
+                log_warn "Version-specific packages may be missing, trying generic package names..."
+                yum remove -y gcc make kernel-devel kernel-headers bc || true
+            }
+        fi
+    elif [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
+        if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
+            if [[ -n "$KERNEL_CLANG_MAJOR" ]]; then
+                apt-get remove -y gcc make clang-$KERNEL_CLANG_MAJOR llvm-$KERNEL_CLANG_MAJOR lld-$KERNEL_CLANG_MAJOR linux-headers-$(uname -r) bc 2>/dev/null || {
+                    log_warn "Versioned clang packages may be missing, trying generic package names..."
+                    apt-get remove -y gcc make clang llvm lld linux-headers-$(uname -r) bc 2>/dev/null || {
+                        log_warn "Header package may differ, trying generic header package..."
+                        apt-get remove -y gcc make clang llvm lld linux-headers-generic bc || true
+                    }
+                }
+            else
+                apt-get remove -y gcc make clang llvm lld linux-headers-$(uname -r) bc 2>/dev/null || {
+                    log_warn "Header package may differ, trying generic header package..."
+                    apt-get remove -y gcc make clang llvm lld linux-headers-generic bc || true
+                }
+            fi
+        else
+            apt-get remove -y gcc make linux-headers-$(uname -r) bc 2>/dev/null || {
+                log_warn "Header package may differ, trying generic header package..."
+                apt-get remove -y gcc make linux-headers-generic bc || true
+            }
+        fi
+        apt-get autoremove -y >/dev/null 2>&1 || true
+    fi
+
+    log_success "Dependencies removed"
 }
 
 download_source() {
@@ -248,15 +366,24 @@ EOF
     log_success "Source code downloaded"
 }
 
+detect_make_args() {
+    if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
+        log_info "Enabling make ${MAKE_ARGS[*]}"
+    else
+        log_info "Using default make parameters"
+    fi
+}
+
 compile_module() {
     log_info "Compiling LotSpeed v$VERSION kernel module..."
 
     cd $INSTALL_DIR
-    make clean >/dev/null 2>&1
+    detect_make_args
+    make "${MAKE_ARGS[@]}" clean >/dev/null 2>&1
 
-    if ! make >/dev/null 2>&1; then
+    if ! make "${MAKE_ARGS[@]}" >/dev/null 2>&1; then
         log_error "Compilation failed. Checking error..."
-        make 2>&1 | tail -20
+        make "${MAKE_ARGS[@]}" 2>&1 | tail -20
         exit 1
     fi
 
@@ -798,11 +925,20 @@ main() {
     clear
     print_banner
 
+    check_root || error_exit "Root check failed"
+    check_system || error_exit "System check failed"
+    detect_kernel_build_toolchain
+
+    if [[ "$ACTION" == "-u" ]]; then
+        echo -e "${CYAN}Starting dependency removal at $CURRENT_TIME${NC}"
+        echo ""
+        uninstall_dependencies || error_exit "Dependency removal failed"
+        exit 0
+    fi
+
     echo -e "${CYAN}Starting installation at $CURRENT_TIME${NC}"
     echo ""
 
-    check_root || error_exit "Root check failed"
-    check_system || error_exit "System check failed"
     install_dependencies || error_exit "Dependency installation failed"
     download_source || error_exit "Source download failed"
     compile_module || error_exit "Module compilation failed"
