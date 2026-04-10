@@ -286,36 +286,36 @@ uninstall_dependencies() {
 
     if [[ "$OS" == "centos" ]]; then
         if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
-            yum remove -y gcc make clang llvm lld kernel-devel-$(uname -r) kernel-headers-$(uname -r) bc 2>/dev/null || {
+            yum remove -y gcc make clang llvm lld kernel-devel-$(uname -r) kernel-headers-$(uname -r) 2>/dev/null || {
                 log_warn "Version-specific packages may be missing, trying generic package names..."
-                yum remove -y gcc make clang llvm lld kernel-devel kernel-headers bc || true
+                yum remove -y gcc make clang llvm lld kernel-devel kernel-headers || true
             }
         else
-            yum remove -y gcc make kernel-devel-$(uname -r) kernel-headers-$(uname -r) bc 2>/dev/null || {
+            yum remove -y gcc make kernel-devel-$(uname -r) kernel-headers-$(uname -r) 2>/dev/null || {
                 log_warn "Version-specific packages may be missing, trying generic package names..."
-                yum remove -y gcc make kernel-devel kernel-headers bc || true
+                yum remove -y gcc make kernel-devel kernel-headers || true
             }
         fi
     elif [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
         if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
             if [[ -n "$KERNEL_CLANG_MAJOR" ]]; then
-                apt-get remove -y gcc make clang-$KERNEL_CLANG_MAJOR llvm-$KERNEL_CLANG_MAJOR lld-$KERNEL_CLANG_MAJOR linux-headers-$(uname -r) bc 2>/dev/null || {
+                apt-get remove -y gcc make clang-$KERNEL_CLANG_MAJOR llvm-$KERNEL_CLANG_MAJOR lld-$KERNEL_CLANG_MAJOR linux-headers-$(uname -r) 2>/dev/null || {
                     log_warn "Versioned clang packages may be missing, trying generic package names..."
-                    apt-get remove -y gcc make clang llvm lld linux-headers-$(uname -r) bc 2>/dev/null || {
+                    apt-get remove -y gcc make clang llvm lld linux-headers-$(uname -r) 2>/dev/null || {
                         log_warn "Header package may differ, trying generic header package..."
-                        apt-get remove -y gcc make clang llvm lld linux-headers-generic bc || true
+                        apt-get remove -y gcc make clang llvm lld linux-headers-generic || true
                     }
                 }
             else
-                apt-get remove -y gcc make clang llvm lld linux-headers-$(uname -r) bc 2>/dev/null || {
+                apt-get remove -y gcc make clang llvm lld linux-headers-$(uname -r) 2>/dev/null || {
                     log_warn "Header package may differ, trying generic header package..."
-                    apt-get remove -y gcc make clang llvm lld linux-headers-generic bc || true
+                    apt-get remove -y gcc make clang llvm lld linux-headers-generic || true
                 }
             fi
         else
-            apt-get remove -y gcc make linux-headers-$(uname -r) bc 2>/dev/null || {
+            apt-get remove -y gcc make linux-headers-$(uname -r) 2>/dev/null || {
                 log_warn "Header package may differ, trying generic header package..."
-                apt-get remove -y gcc make linux-headers-generic bc || true
+                apt-get remove -y gcc make linux-headers-generic || true
             }
         fi
         apt-get autoremove -y >/dev/null 2>&1 || true
@@ -688,25 +688,25 @@ apply_preset() {
     case $PRESET in
         conservative)
             set_val lotserver_rate 125000000
-            set_val lotserver_start_rate 12500000
+            set_val lotserver_start_rate 125000000
             set_val lotserver_gain 15
             set_val lotserver_min_cwnd 16
             set_val lotserver_max_cwnd 15000
             set_val lotserver_beta 717
             set_val lotserver_adaptive 1
-            set_val lotserver_turbo 0
+            set_val lotserver_turbo 1
             set_val lotserver_safe_mode 1
             print_box_row "Applied: Conservative (1Gbps, 1.5x, Safe)" "left"
             ;;
         balanced)
             set_val lotserver_rate 256000000
-            set_val lotserver_start_rate 25000000
+            set_val lotserver_start_rate 204800000
             set_val lotserver_gain 20
             set_val lotserver_min_cwnd 16
             set_val lotserver_max_cwnd 15000
             set_val lotserver_beta 717
             set_val lotserver_adaptive 1
-            set_val lotserver_turbo 0
+            set_val lotserver_turbo 1
             set_val lotserver_safe_mode 1
             print_box_row "Applied: Balanced (2.5Gbps, 2.0x, Adaptive)" "left"
             ;;
