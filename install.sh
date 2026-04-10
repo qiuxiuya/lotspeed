@@ -11,7 +11,7 @@
 set -e
 
 # ================= 配置区域 =================
-GITHUB_REPO="uk0/lotspeed"
+GITHUB_REPO="qiuxiuya/lotspeed"
 GITHUB_BRANCH="zeta-tcp"
 INSTALL_DIR="/opt/lotspeed"
 MODULE_NAME="lotspeed"
