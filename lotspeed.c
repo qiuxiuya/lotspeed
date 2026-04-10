@@ -83,14 +83,14 @@
 // 1. 全局物理上限 (1Gbps = 125MB/s)
 static unsigned long lotserver_rate = 125000000;
 // 2. [新增] 软启动速率 (80Mbps = 10.00MB/s) - 保护小水管
-static unsigned long lotserver_start_rate = 10000000;
+static unsigned long lotserver_start_rate = 62500000;
 
 static unsigned int lotserver_gain = 20;
 static unsigned int lotserver_min_cwnd = 16;
 static unsigned int lotserver_max_cwnd = 15000; // 稍微放宽，因为有BDP Cap保护
 static unsigned int lotserver_beta = 717;
 static bool lotserver_adaptive = true;
-static bool lotserver_turbo = false;
+static bool lotserver_turbo = true;
 static bool lotserver_verbose = false;
 static bool lotserver_safe_mode = true;
 
