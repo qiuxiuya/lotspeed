@@ -299,22 +299,22 @@ uninstall_dependencies() {
     elif [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
         if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
             if [[ -n "$KERNEL_CLANG_MAJOR" ]]; then
-                apt-get remove -y gcc make clang-$KERNEL_CLANG_MAJOR llvm-$KERNEL_CLANG_MAJOR lld-$KERNEL_CLANG_MAJOR linux-headers-$(uname -r) 2>/dev/null || {
+                apt-get remove -y gcc make clang-$KERNEL_CLANG_MAJOR llvm-$KERNEL_CLANG_MAJOR lld-$KERNEL_CLANG_MAJOR >/dev/null 2>&1 || {
                     log_warn "Versioned clang packages may be missing, trying generic package names..."
-                    apt-get remove -y gcc make clang llvm lld linux-headers-$(uname -r) 2>/dev/null || {
-                        log_warn "Header package may differ, trying generic header package..."
+                    apt-get remove -y gcc make clang llvm lld >/dev/null 2>&1 || {
+                        log_warn "Package names may differ, trying fallback set..."
                         apt-get remove -y gcc make clang llvm lld linux-headers-generic || true
                     }
                 }
             else
-                apt-get remove -y gcc make clang llvm lld linux-headers-$(uname -r) 2>/dev/null || {
-                    log_warn "Header package may differ, trying generic header package..."
+                apt-get remove -y gcc make clang llvm lld >/dev/null 2>&1 || {
+                    log_warn "Package names may differ, trying fallback set..."
                     apt-get remove -y gcc make clang llvm lld linux-headers-generic || true
                 }
             fi
         else
-            apt-get remove -y gcc make linux-headers-$(uname -r) 2>/dev/null || {
-                log_warn "Header package may differ, trying generic header package..."
+            apt-get remove -y gcc make >/dev/null 2>&1 || {
+                log_warn "Package names may differ, trying fallback set..."
                 apt-get remove -y gcc make linux-headers-generic || true
             }
         fi
