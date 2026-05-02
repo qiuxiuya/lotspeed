@@ -687,14 +687,14 @@ apply_preset() {
 
     case $PRESET in
         conservative)
-            set_val lotserver_rate 125000000
+            set_val lotserver_turbo 0
             set_val lotserver_start_rate 125000000
             set_val lotserver_gain 15
             set_val lotserver_min_cwnd 16
             set_val lotserver_max_cwnd 15000
             set_val lotserver_beta 717
             set_val lotserver_adaptive 1
-            set_val lotserver_turbo 1
+            set_val lotserver_turbo 0
             set_val lotserver_safe_mode 1
             print_box_row "Applied: Conservative (1Gbps, 1.5x, Safe)" "left"
             ;;
@@ -706,7 +706,7 @@ apply_preset() {
             set_val lotserver_max_cwnd 15000
             set_val lotserver_beta 717
             set_val lotserver_adaptive 1
-            set_val lotserver_turbo 1
+            set_val lotserver_turbo 0
             set_val lotserver_safe_mode 1
             print_box_row "Applied: Balanced (2.5Gbps, 2.0x, Adaptive)" "left"
             ;;

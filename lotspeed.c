@@ -90,7 +90,7 @@ static unsigned int lotserver_min_cwnd = 16;
 static unsigned int lotserver_max_cwnd = 15000; // 稍微放宽，因为有BDP Cap保护
 static unsigned int lotserver_beta = 717;
 static bool lotserver_adaptive = true;
-static bool lotserver_turbo = true;
+static bool lotserver_turbo = false;
 static bool lotserver_verbose = false;
 static bool lotserver_safe_mode = true;
 

@@ -64,7 +64,7 @@ dmesg -w
 | **`lotserver_max_cwnd`** | `unsigned int` | `15000` | **最大拥塞窗口**。`snd_cwnd` 的绝对物理上限。 | 单位：packets。回调函数强制修正：`if (lotserver_max_cwnd > 100000) lotserver_max_cwnd = 100000`。 |
 | **`lotserver_beta`** | `unsigned int` | `717` | **拥塞退让因子**。发生拥塞丢包时，新慢启动门限计算公式：`(cwnd * lotserver_beta) / 1024`。 | 实际保留比例约为 **70%** (717/1024)。回调限制范围：`512 ~ 1024`。 |
 | **`lotserver_adaptive`** | `bool` | `true` | **动态自适应开关**。在代码中虽定义为参数，但在当前 v5.6 逻辑中主要用于状态机微调增益的开关判断。 | 取值为 `1` (开启) 或 `0` (关闭)。 |
-| **`lotserver_turbo`** | `bool` | `true` | **激进模式开关**。开启后会设置 `snd_ssthresh = TCP_INFINITE_SSTHRESH`，允许慢启动无限制指数增长。 | 取值为 `1` (开启) 或 `0` (关闭)。注意：开启时会忽略部分安全检测。 |
+| **`lotserver_turbo`** | `bool` | `false` | **激进模式开关**。开启后会设置 `snd_ssthresh = TCP_INFINITE_SSTHRESH`，允许慢启动无限制指数增长。 | 取值为 `1` (开启) 或 `0` (关闭)。注意：开启时会忽略部分安全检测。 |
 | **`lotserver_verbose`** | `bool` | `false` | **详细日志开关**。控制是否打印状态切换的 `pr_info` 内核日志。 | 取值为 `1` (打印日志) 或 `0` (静默)。 |
 | **`lotserver_safe_mode`** | `bool` | `true` | **安全模式开关**。启用后会激活 **丢包率熔断** (15%) 和 **BDP 3倍上限保护**，并在丢包时执行更严格的窗口削减。 | 取值为 `1` (开启) 或 `0` (关闭)。追求极致速度可尝试关闭。 |
 
