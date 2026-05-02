@@ -23,6 +23,8 @@
 #include <linux/spinlock.h>
 #include <linux/rculist.h>
 #include <linux/compiler.h>
+#include <linux/jhash.h>
+#include <net/ipv6.h>
 
 // --- 安全性宏定义 ---
 #define SAFETY_CHECK(ptr, ret) do { \
@@ -144,10 +146,18 @@ static atomic_t total_losses = ATOMIC_INIT(0);
 static atomic_t history_entries_count = ATOMIC_INIT(0);
 
 // --- ZETA 学习引擎结构 ---
+struct zeta_addr_key {
+    sa_family_t family;
+    union {
+        __be32 v4;
+        struct in6_addr v6;
+    } addr;
+};
+
 struct zeta_history_entry {
     struct hlist_node node;
     struct rcu_head rcu;
-    u32 daddr;
+    struct zeta_addr_key addr_key;
     u64 cached_bw;
     u32 cached_min_rtt;
     u32 cached_median_rtt;
@@ -158,6 +168,69 @@ struct zeta_history_entry {
 
 static DEFINE_HASHTABLE(zeta_history_map, HISTORY_BITS);
 static DEFINE_SPINLOCK(zeta_history_lock);
+
+static bool zeta_addr_equal(const struct zeta_addr_key *a, const struct zeta_addr_key *b)
+{
+    if (a->family != b->family)
+        return false;
+
+    switch (a->family) {
+        case AF_INET:
+            return a->addr.v4 == b->addr.v4;
+        case AF_INET6:
+            return ipv6_addr_equal(&a->addr.v6, &b->addr.v6);
+        default:
+            return false;
+    }
+}
+
+static u32 zeta_addr_hash(const struct zeta_addr_key *key)
+{
+    return jhash(key, sizeof(*key), 0);
+}
+
+static bool zeta_get_dst_key(const struct sock *sk, struct zeta_addr_key *key)
+{
+    memset(key, 0, sizeof(*key));
+
+    if (!sk)
+        return false;
+
+    key->family = sk->sk_family;
+    switch (sk->sk_family) {
+        case AF_INET:
+            if (!sk->sk_daddr)
+                return false;
+            key->addr.v4 = sk->sk_daddr;
+            return true;
+        case AF_INET6:
+            if (ipv6_addr_any(&sk->sk_v6_daddr))
+                return false;
+            key->addr.v6 = sk->sk_v6_daddr;
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void zeta_log_history_hit(const struct zeta_addr_key *key, u64 target_rate)
+{
+    if (!lotserver_verbose || !key)
+        return;
+
+    switch (key->family) {
+        case AF_INET:
+            pr_info("lotspeed: [Zeta] HIT %pI4! Rate=%llu Mbps\n",
+                    &key->addr.v4, target_rate * 8 / 1000000);
+            break;
+        case AF_INET6:
+            pr_info("lotspeed: [Zeta] HIT %pI6c! Rate=%llu Mbps\n",
+                    &key->addr.v6, target_rate * 8 / 1000000);
+            break;
+        default:
+            break;
+    }
+}
 
 // --- 核心状态机 ---
 enum lotspeed_state {
@@ -222,29 +295,32 @@ static void __maybe_unused free_history_entry_rcu(struct rcu_head *head)
     atomic_dec(&history_entries_count);
 }
 
-static struct zeta_history_entry *find_history_safe(u32 daddr)
+static struct zeta_history_entry *find_history_safe(const struct zeta_addr_key *addr_key, u32 key_hash)
 {
     struct zeta_history_entry *entry;
-    hash_for_each_possible_rcu(zeta_history_map, entry, node, daddr) {
-        if (entry && entry->daddr == daddr) {
+    hash_for_each_possible_rcu(zeta_history_map, entry, node, key_hash) {
+        if (entry && zeta_addr_equal(&entry->addr_key, addr_key)) {
             return entry;
         }
     }
     return NULL;
 }
 
-static void update_history_safe(u32 daddr, u64 bw, u32 rtt, u32 loss_count)
+static void update_history_safe(const struct zeta_addr_key *addr_key, u64 bw, u32 rtt, u32 loss_count)
 {
     struct zeta_history_entry *entry, *oldest = NULL;
     u64 oldest_time = ULLONG_MAX;
     bool found = false;
     int bkt;
+    u32 key_hash;
 
-    if (!bw || !rtt) return;
+    if (!addr_key || !bw || !rtt) return;
+
+    key_hash = zeta_addr_hash(addr_key);
 
     spin_lock_bh(&zeta_history_lock);
 
-    entry = find_history_safe(daddr);
+    entry = find_history_safe(addr_key, key_hash);
     if (entry) {
         entry->cached_bw = (entry->cached_bw * 7 + bw * 3) / 10;
         if (rtt < entry->cached_min_rtt) entry->cached_min_rtt = rtt;
@@ -272,14 +348,14 @@ static void update_history_safe(u32 daddr, u64 bw, u32 rtt, u32 loss_count)
 
         entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
         if (entry) {
-            entry->daddr = daddr;
+            entry->addr_key = *addr_key;
             entry->cached_bw = bw;
             entry->cached_min_rtt = rtt;
             entry->cached_median_rtt = rtt;
             entry->loss_count = loss_count;
             entry->sample_count = 1;
             entry->last_update = get_jiffies_64();
-            hash_add_rcu(zeta_history_map, &entry->node, daddr);
+            hash_add_rcu(zeta_history_map, &entry->node, key_hash);
             atomic_inc(&history_entries_count);
         }
     }
@@ -308,12 +384,16 @@ static void lotspeed_init(struct sock *sk)
     struct tcp_sock *tp;
     struct lotspeed *ca;
     struct zeta_history_entry *history;
-    u32 daddr;
+    struct zeta_addr_key addr_key;
+    bool has_addr_key;
+    u32 key_hash = 0;
 
     SAFETY_CHECK(sk, );
     tp = tcp_sk(sk);
     ca = inet_csk_ca(sk);
-    daddr = sk->sk_daddr;
+    has_addr_key = zeta_get_dst_key(sk, &addr_key);
+    if (has_addr_key)
+        key_hash = zeta_addr_hash(&addr_key);
 
     memset(ca, 0, sizeof(struct lotspeed));
 
@@ -341,47 +421,48 @@ static void lotspeed_init(struct sock *sk)
     atomic_inc(&active_connections);
 
     // Zeta Learning: 如果有历史记录，则根据历史记录设置起始速度
-    rcu_read_lock();
-    history = find_history_safe(daddr);
-    if (history && history->sample_count >= ZETA_MIN_SAMPLES) {
-        u64 age_ms = jiffies_to_msecs(get_jiffies_64() - history->last_update);
-        if (age_ms < HISTORY_TTL_SEC * 1000ULL && history->cached_bw > 0) {
-            // 使用历史带宽，但也受限于 global rate
-            u64 learned_rate = (history->cached_bw * ZETA_ALPHA) / 100;
+    if (has_addr_key) {
+        rcu_read_lock();
+        history = find_history_safe(&addr_key, key_hash);
+        if (history && history->sample_count >= ZETA_MIN_SAMPLES) {
+            u64 age_ms = jiffies_to_msecs(get_jiffies_64() - history->last_update);
+            if (age_ms < HISTORY_TTL_SEC * 1000ULL && history->cached_bw > 0) {
+                // 使用历史带宽，但也受限于 global rate
+                u64 learned_rate = (history->cached_bw * ZETA_ALPHA) / 100;
 
-            // 如果历史速度 > start_rate，则提升，但不超过 global rate
-            if (learned_rate > ca->target_rate) {
-                ca->target_rate = learned_rate;
-            }
-            if (ca->target_rate > lotserver_rate) {
-                ca->target_rate = lotserver_rate;
-            }
+                // 如果历史速度 > start_rate，则提升，但不超过 global rate
+                if (learned_rate > ca->target_rate) {
+                    ca->target_rate = learned_rate;
+                }
+                if (ca->target_rate > lotserver_rate) {
+                    ca->target_rate = lotserver_rate;
+                }
 
-            ca->rtt_min = history->cached_min_rtt;
-            ca->rtt_median = history->cached_median_rtt;
-            ca->history_hit = true;
+                ca->rtt_min = history->cached_min_rtt;
+                ca->rtt_median = history->cached_median_rtt;
+                ca->history_hit = true;
 
-            if (tp->mss_cache > 0 && ca->rtt_min > 0) {
-                u64 bdp = ca->target_rate * (u64)ca->rtt_min;
-                u32 init_cwnd = SAFE_DIV64(bdp, (u64)tp->mss_cache * 1000000ULL);
-                init_cwnd = clamp(init_cwnd, 10U, lotserver_max_cwnd);
-                tp->snd_cwnd = init_cwnd;
-                tp->snd_ssthresh = max(init_cwnd, 10U);
-                ca->state = PROBING;
-                ca->ss_mode = false;
-                if (lotserver_verbose) {
-                    pr_info("lotspeed: [Zeta] HIT %pI4! Rate=%llu Mbps\n", &daddr, ca->target_rate * 8 / 1000000);
+                if (tp->mss_cache > 0 && ca->rtt_min > 0) {
+                    u64 bdp = ca->target_rate * (u64)ca->rtt_min;
+                    u32 init_cwnd = SAFE_DIV64(bdp, (u64)tp->mss_cache * 1000000ULL);
+                    init_cwnd = clamp(init_cwnd, 10U, lotserver_max_cwnd);
+                    tp->snd_cwnd = init_cwnd;
+                    tp->snd_ssthresh = max(init_cwnd, 10U);
+                    ca->state = PROBING;
+                    ca->ss_mode = false;
+                    zeta_log_history_hit(&addr_key, ca->target_rate);
                 }
             }
         }
+        rcu_read_unlock();
     }
-    rcu_read_unlock();
 }
 
 // --- 释放连接 ---
 static void lotspeed_release(struct sock *sk)
 {
     struct lotspeed *ca = inet_csk_ca(sk);
+    struct zeta_addr_key addr_key;
 
     if (!ca) {
         atomic_dec(&active_connections);
@@ -394,8 +475,8 @@ static void lotspeed_release(struct sock *sk)
     if (ca->sample_count >= ZETA_MIN_SAMPLES &&
         ca->actual_rate > 0 &&
         ca->rtt_min > 0 &&
-        sk->sk_daddr != 0) {
-        update_history_safe(sk->sk_daddr, ca->actual_rate, ca->rtt_min, ca->loss_count);
+        zeta_get_dst_key(sk, &addr_key)) {
+        update_history_safe(&addr_key, ca->actual_rate, ca->rtt_min, ca->loss_count);
     }
 }
 
