@@ -61,14 +61,30 @@ static u32 zeta_calc_rtt_cong_prob(struct zeta_rtt_info *rtt,
     u32 prob = 0;
     u32 rtt_diff;
     u32 rtt_ratio;
+    u32 rtt_base;
+    u32 jitter_guard;
+    u32 gradient_scale;
     
     if (rtt->min_rtt == 0 || rtt->srtt == 0)
         return 0;
     
+    /*
+     * 低 RTT 场景下，直接使用 min_rtt 作为分母会把几十/几百微秒的调度抖动
+     * 放大成很高的拥塞概率。这里引入两个保护：
+     * 1. 对分母做下限钳制，避免超低 RTT 时比例过敏
+     * 2. 扣除一部分 jitter guard，将正常抖动/时间戳误差过滤掉
+     */
+    rtt_base = max_t(u32, rtt->min_rtt, 4000U);
+    jitter_guard = max_t(u32, rtt_base / 16,
+                         max_t(u32, rtt->rttvar, 200U));
+    
     /* 计算 RTT 膨胀率 */
     if (rtt->srtt > rtt->min_rtt) {
         rtt_diff = rtt->srtt - rtt->min_rtt;
-        rtt_ratio = rtt_diff * 1000 / rtt->min_rtt;
+        if (rtt_diff <= jitter_guard)
+            rtt_ratio = 0;
+        else
+            rtt_ratio = (rtt_diff - jitter_guard) * 1000 / rtt_base;
     } else {
         rtt_ratio = 0;
     }
@@ -90,13 +106,22 @@ static u32 zeta_calc_rtt_cong_prob(struct zeta_rtt_info *rtt,
         prob = 800 + min_t(u32,rtt_ratio - 1000, 200U) * 200 / 200;
     }
     
-    /* RTT 梯度修正：如果 RTT 在持续增加，增加概率 */
+    /*
+     * RTT 梯度在低 RTT 场景也容易过于敏感，因此按基线 RTT 做缩放。
+     * RTT 越低，梯度贡献越保守。
+     */
+    gradient_scale = max_t(u32, rtt_base / 1000, 1U);
+    
     if (cong->rtt_gradient > 0) {
-        u32 gradient_factor = min_t(u32,(u32)cong->rtt_gradient / 10, 200U);
+        u32 gradient_factor = min_t(u32,
+                                    (u32)cong->rtt_gradient / (10 * gradient_scale),
+                                    200U);
         prob = min_t(u32,prob + gradient_factor, 1000U);
     } else if (cong->rtt_gradient < 0) {
         /* RTT 在下降，降低概率 */
-        u32 gradient_factor = min_t(u32,(u32)(-cong->rtt_gradient) / 10, 200U);
+        u32 gradient_factor = min_t(u32,
+                                    (u32)(-cong->rtt_gradient) / (10 * gradient_scale),
+                                    200U);
         prob = prob > gradient_factor ? prob - gradient_factor : 0;
     }
     

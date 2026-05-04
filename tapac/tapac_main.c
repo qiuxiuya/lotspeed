@@ -128,8 +128,8 @@ static void tapac_params_default(struct tapac_params *p)
     p->nic[sizeof(p->nic) - 1] = '\0';
     p->mss = 1460;
     p->min_win = 10;
-    p->timer_interval_us = 1000;    /* 1ms 定时器 */
-    p->min_rtt = 20000;
+    p->timer_interval_us = 250;     /* 250us 定时器，改善低 RTT 场景反馈粒度 */
+    p->min_rtt = 1000;              /* 1ms，避免低 RTT 被错误钳到 20ms */
     p->max_rtt = 500000;
     p->max_delay = 50000;
     p->bucket_size = 32 * 1024 * 1024;
@@ -140,7 +140,7 @@ static void tapac_params_default(struct tapac_params *p)
     p->reduction_thresh = 3;
     p->prio_thresh = 1ULL * 1024 * 1024;
     p->ss_thresh = 2ULL * 1024 * 1024;
-    p->ack_delay_ms = 5;
+    p->ack_delay_ms = 1;            /* 低 RTT 默认使用更小 ACK 延迟 */
     p->win_inflate_factor = 16;
     p->ack_every_n_packets = 2;
     p->upload_accel_thresh = 10 * 1024;

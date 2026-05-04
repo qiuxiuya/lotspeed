@@ -74,7 +74,7 @@ u32 tapac_calc_ack_delay(struct tapac_engine *eng,
     u32 delay;
 
     if (!eng || !info)
-        return ACK_DELAY_MIN_MS;
+        return 1;
 
     if ((info->flags & FLOW_FLAG_LOSS_DETECTED) ||
         info->phase == PHASE_FAST_RECOVERY) {
@@ -86,15 +86,17 @@ u32 tapac_calc_ack_delay(struct tapac_engine *eng,
             return 2;
         }
         delay = info->srtt / 32000;
-        if (delay < 2)
-            delay = 2;
+        if (delay < 1)
+            delay = 1;
         if (delay > 5)
             delay = 5;
         return delay;
     }
 
     if (info->phase == PHASE_SLOW_START) {
-        return 3;
+        if (info->srtt > 0 && info->srtt <= 4000)
+            return 1;
+        return 2;
     }
 
     if (info->rtt.min_rtt > 0) {
@@ -105,8 +107,15 @@ u32 tapac_calc_ack_delay(struct tapac_engine *eng,
         delay = eng->params.ack_delay_ms;
     }
 
-    if (delay < ACK_DELAY_MIN_MS)
-        delay = ACK_DELAY_MIN_MS;
+    if ((info->rtt.min_rtt > 0 && info->rtt.min_rtt <= 4000) ||
+        (info->srtt > 0 && info->srtt <= 4000)) {
+        if (delay < 1)
+            delay = 1;
+    } else {
+        if (delay < ACK_DELAY_MIN_MS)
+            delay = ACK_DELAY_MIN_MS;
+    }
+
     if (delay > 10)
         delay = 10;
 

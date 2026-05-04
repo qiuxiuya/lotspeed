@@ -440,12 +440,12 @@ static void zeta_params_default(struct zeta_params *p)
     p->max_delay_us = 200000;           /* 200ms */
 
     /* 定时器 */
-    p->timer_interval_us = 1000;        /* 1ms */
-
+    p->timer_interval_us = 250;         /* 250us，改善低 RTT 场景反馈粒度 */
+    
     /* 功能开关 */
     p->enable_sack = 1;
     p->enable_ecn = 1;
-    p->enable_pacing = 0;
+    p->enable_pacing = 1;               /* 低 RTT 下默认启用 pacing，降低突发 */
     p->enable_reverse = 1;
 }
 

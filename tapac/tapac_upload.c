@@ -216,20 +216,29 @@ static u32 tapac_calc_ack_interval(struct tapac_engine *eng,
                                    struct tapac_flow_info *info)
 {
     u32 interval;
+    u32 srtt;
 
     if (! eng || !info)
         return 10000;
 
+    srtt = info->srtt ? info->srtt : eng->params.min_rtt;
+
     if (info->flags & FLOW_FLAG_LOSS_DETECTED) {
-        interval = 2000;
+        interval = srtt / 16;
+        if (interval < 250)
+            interval = 250;
+        if (interval > 2000)
+            interval = 2000;
     } else if (info->phase == PHASE_SLOW_START) {
-        interval = info->srtt / 8;
-        if (interval < 3000)
+        interval = srtt / 8;
+        if (interval < 500)
+            interval = 500;
+        if (interval > 3000)
             interval = 3000;
     } else {
-        interval = info->srtt / 4;
-        if (interval < 5000)
-            interval = 5000;
+        interval = srtt / 4;
+        if (interval < 1000)
+            interval = 1000;
         if (interval > 50000)
             interval = 50000;
     }
