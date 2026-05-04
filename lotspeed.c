@@ -13,9 +13,13 @@
 #include <linux/time.h>
 #include <linux/string.h>
 #include <linux/math64.h>
+#include <linux/jhash.h>
 #include <net/tcp.h>
 #include <linux/tcp.h>
 #include <linux/hashtable.h>
+#if IS_ENABLED(CONFIG_IPV6)
+#include <net/ipv6.h>
+#endif
 #include <linux/rculist.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -199,11 +203,21 @@ struct lotspeed {
     bool ss_mode;
 };
 
+struct ls_hist_key {
+    u8 family;
+    union {
+        __be32 v4;
+#if IS_ENABLED(CONFIG_IPV6)
+        struct in6_addr v6;
+#endif
+    } addr;
+};
+
 // 历史样本
 struct ls_hist_entry {
     struct hlist_node node;
     struct rcu_head rcu;
-    u32 daddr;
+    struct ls_hist_key key;
     u64 bw_bytes_sec;
     u32 rtt_min_us;
     u32 rtt_median_us;
@@ -217,6 +231,64 @@ static DEFINE_HASHTABLE(ls_hist_table, LS_HIST_BITS);
 static DEFINE_SPINLOCK(ls_hist_lock);
 static struct kmem_cache *ls_hist_cache;
 static atomic_t ls_hist_count = ATOMIC_INIT(0);
+
+static bool ls_get_dst_key(const struct sock *sk, struct ls_hist_key *key)
+{
+    memset(key, 0, sizeof(*key));
+
+    if (!sk)
+        return false;
+
+    switch (sk->sk_family) {
+    case AF_INET:
+        if (!sk->sk_daddr)
+            return false;
+        key->family = AF_INET;
+        key->addr.v4 = sk->sk_daddr;
+        return true;
+#if IS_ENABLED(CONFIG_IPV6)
+    case AF_INET6:
+        if (ipv6_addr_any(&sk->sk_v6_daddr))
+            return false;
+        key->family = AF_INET6;
+        key->addr.v6 = sk->sk_v6_daddr;
+        return true;
+#endif
+    default:
+        return false;
+    }
+}
+
+static u32 ls_hist_hash_key(const struct ls_hist_key *key)
+{
+    switch (key->family) {
+    case AF_INET:
+        return jhash_1word((__force u32)key->addr.v4, AF_INET);
+#if IS_ENABLED(CONFIG_IPV6)
+    case AF_INET6:
+        return jhash(key->addr.v6.s6_addr, sizeof(key->addr.v6.s6_addr), AF_INET6);
+#endif
+    default:
+        return 0;
+    }
+}
+
+static bool ls_hist_key_equal(const struct ls_hist_key *a, const struct ls_hist_key *b)
+{
+    if (a->family != b->family)
+        return false;
+
+    switch (a->family) {
+    case AF_INET:
+        return a->addr.v4 == b->addr.v4;
+#if IS_ENABLED(CONFIG_IPV6)
+    case AF_INET6:
+        return ipv6_addr_equal(&a->addr.v6, &b->addr.v6);
+#endif
+    default:
+        return false;
+    }
+}
 
 static void enter_state(struct sock *sk, enum lotspeed_state new_state)
 {
@@ -244,7 +316,8 @@ static void lotspeed_init(struct sock *sk)
     struct tcp_sock *tp = tcp_sk(sk);
     struct lotspeed *ca = inet_csk_ca(sk);
     struct ls_hist_entry *hist = NULL;
-    u32 daddr = sk->sk_daddr;
+    struct ls_hist_key dst_key;
+    u32 hist_hash = 0;
 
     memset(ca, 0, sizeof(*ca));
     ca->state = FAST_STARTUP;
@@ -258,10 +331,11 @@ static void lotspeed_init(struct sock *sk)
 #endif
 
     // 历史初始化：如果命中历史，预填充基准 RTT 与起始 cwnd
-    if (lotserver_hist_enable && daddr) {
+    if (lotserver_hist_enable && ls_get_dst_key(sk, &dst_key)) {
+        hist_hash = ls_hist_hash_key(&dst_key);
         rcu_read_lock();
-        hash_for_each_possible_rcu(ls_hist_table, hist, node, daddr) {
-            if (hist->daddr == daddr) {
+        hash_for_each_possible_rcu(ls_hist_table, hist, node, hist_hash) {
+            if (ls_hist_key_equal(&hist->key, &dst_key)) {
                 u64 age_ms = jiffies_to_msecs(get_jiffies_64() - hist->last_update_jif);
                 if (age_ms < (u64)lotserver_hist_ttl_sec * 1000 &&
                     hist->sample_cnt >= lotserver_hist_min_samples &&
@@ -291,10 +365,13 @@ static void lotspeed_release(struct sock *sk)
 {
     struct lotspeed *ca = inet_csk_ca(sk);
     struct tcp_sock *tp = tcp_sk(sk);
-    u32 daddr = sk->sk_daddr;
+    struct ls_hist_key dst_key;
+    u32 hist_hash;
 
-    if (!lotserver_hist_enable || !ca || !daddr)
+    if (!lotserver_hist_enable || !ca || !ls_get_dst_key(sk, &dst_key))
         return;
+
+    hist_hash = ls_hist_hash_key(&dst_key);
 
     if (tp->srtt_us == 0 || tp->mss_cache == 0)
         return;
@@ -316,8 +393,8 @@ static void lotspeed_release(struct sock *sk)
         }
 
         spin_lock_bh(&ls_hist_lock);
-        hash_for_each_possible(ls_hist_table, entry, node, daddr) {
-            if (entry->daddr == daddr) {
+        hash_for_each_possible(ls_hist_table, entry, node, hist_hash) {
+            if (ls_hist_key_equal(&entry->key, &dst_key)) {
                 // 更新现有
                 entry->bw_bytes_sec = entry->bw_bytes_sec ? (entry->bw_bytes_sec * 7 + bw_bytes_sec * 3) / 10 : bw_bytes_sec;
                 entry->rtt_min_us = entry->rtt_min_us && ca->rtt_min ? min(entry->rtt_min_us, ca->rtt_min) : ca->rtt_min;
@@ -347,14 +424,14 @@ static void lotspeed_release(struct sock *sk)
 
         entry = kmem_cache_alloc(ls_hist_cache, GFP_ATOMIC);
         if (entry) {
-            entry->daddr = daddr;
+            entry->key = dst_key;
             entry->bw_bytes_sec = bw_bytes_sec;
             entry->rtt_min_us = ca->rtt_min;
             entry->rtt_median_us = tp->srtt_us >> 3;
             entry->loss_ewma = loss;
             entry->sample_cnt = 1;
             entry->last_update_jif = get_jiffies_64();
-            hash_add(ls_hist_table, &entry->node, daddr);
+            hash_add(ls_hist_table, &entry->node, hist_hash);
             atomic_inc(&ls_hist_count);
         }
 out_unlock:
@@ -383,23 +460,29 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
     (void)flag;
 
     // 历史 RTT 预热
-    if (lotserver_hist_enable && ca->rtt_min == 0 && sk->sk_daddr) {
+    if (lotserver_hist_enable && ca->rtt_min == 0) {
         struct ls_hist_entry *hist;
-        rcu_read_lock();
-        hash_for_each_possible_rcu(ls_hist_table, hist, node, sk->sk_daddr) {
-            if (hist->daddr == sk->sk_daddr) {
-                u64 age_ms = jiffies_to_msecs(get_jiffies_64() - hist->last_update_jif);
-                if (age_ms < (u64)lotserver_hist_ttl_sec * 1000 &&
-                    hist->sample_cnt >= lotserver_hist_min_samples &&
-                    hist->rtt_min_us > 0) {
-                    ca->rtt_min = hist->rtt_min_us;
-                    hist_alpha = hist->loss_ewma < 3 ? lotserver_fast_alpha + 5 : lotserver_fast_alpha;
-                    hist_hint = true;
+        struct ls_hist_key dst_key;
+
+        if (ls_get_dst_key(sk, &dst_key)) {
+            u32 hist_hash = ls_hist_hash_key(&dst_key);
+
+            rcu_read_lock();
+            hash_for_each_possible_rcu(ls_hist_table, hist, node, hist_hash) {
+                if (ls_hist_key_equal(&hist->key, &dst_key)) {
+                    u64 age_ms = jiffies_to_msecs(get_jiffies_64() - hist->last_update_jif);
+                    if (age_ms < (u64)lotserver_hist_ttl_sec * 1000 &&
+                        hist->sample_cnt >= lotserver_hist_min_samples &&
+                        hist->rtt_min_us > 0) {
+                        ca->rtt_min = hist->rtt_min_us;
+                        hist_alpha = hist->loss_ewma < 3 ? lotserver_fast_alpha + 5 : lotserver_fast_alpha;
+                        hist_hint = true;
+                    }
+                    break;
                 }
-                break;
             }
+            rcu_read_unlock();
         }
-        rcu_read_unlock();
     }
 
     lotspeed_update_rtt(sk, rtt_us);
