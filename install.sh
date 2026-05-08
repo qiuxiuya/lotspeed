@@ -261,25 +261,48 @@ install_dependencies() {
         fi
     elif [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
         apt-get update >/dev/null 2>&1
+
+        # 检测是否为 cloud 内核 (如 6.1.0-32-cloud-amd64)
+        local is_cloud_kernel=0
+        if [[ "$(uname -r)" == *-cloud-* ]]; then
+            is_cloud_kernel=1
+            log_info "Detected cloud kernel: $(uname -r)"
+        fi
+
         if [[ $KERNEL_USES_LLVM -eq 1 ]]; then
             if [[ -n "$KERNEL_CLANG_MAJOR" ]]; then
                 apt-get install -y gcc make clang-$KERNEL_CLANG_MAJOR llvm-$KERNEL_CLANG_MAJOR lld-$KERNEL_CLANG_MAJOR linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
                     log_warn "Versioned clang toolchain not found, trying generic clang packages..."
                     apt-get install -y gcc make clang llvm lld linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
-                        log_warn "Some packages may be missing, trying alternative..."
-                        apt-get install -y gcc make clang llvm lld linux-headers-generic wget curl bc
+                        log_warn "Specific kernel headers not found, trying cloud/generic alternatives..."
+                        if [[ $is_cloud_kernel -eq 1 ]]; then
+                            apt-get install -y gcc make clang llvm lld linux-headers-cloud-amd64 wget curl bc 2>/dev/null || \
+                            apt-get install -y gcc make clang llvm lld linux-headers-generic wget curl bc
+                        else
+                            apt-get install -y gcc make clang llvm lld linux-headers-generic wget curl bc
+                        fi
                     }
                 }
             else
                 apt-get install -y gcc make clang llvm lld linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
-                    log_warn "Some packages may be missing, trying alternative..."
-                    apt-get install -y gcc make clang llvm lld linux-headers-generic wget curl bc
+                    log_warn "Specific kernel headers not found, trying cloud/generic alternatives..."
+                    if [[ $is_cloud_kernel -eq 1 ]]; then
+                        apt-get install -y gcc make clang llvm lld linux-headers-cloud-amd64 wget curl bc 2>/dev/null || \
+                        apt-get install -y gcc make clang llvm lld linux-headers-generic wget curl bc
+                    else
+                        apt-get install -y gcc make clang llvm lld linux-headers-generic wget curl bc
+                    fi
                 }
             fi
         else
             apt-get install -y gcc make linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
-                log_warn "Some packages may be missing, trying alternative..."
-                apt-get install -y gcc make linux-headers-generic wget curl bc
+                log_warn "Specific kernel headers not found, trying cloud/generic alternatives..."
+                if [[ $is_cloud_kernel -eq 1 ]]; then
+                    apt-get install -y gcc make linux-headers-cloud-amd64 wget curl bc 2>/dev/null || \
+                    apt-get install -y gcc make linux-headers-generic wget curl bc
+                else
+                    apt-get install -y gcc make linux-headers-generic wget curl bc
+                fi
             }
         fi
         # 尝试安装 clang 作为备用编译器（如果 gcc 版本过旧）
@@ -288,6 +311,42 @@ install_dependencies() {
             log_info "GCC version is old, installing clang as backup..."
             apt-get install -y clang 2>/dev/null || log_warn "Could not install clang"
         fi
+    fi
+
+    # 验证内核构建目录是否存在
+    local kernel_build_dir="/lib/modules/$(uname -r)/build"
+    if [[ ! -d "$kernel_build_dir" ]]; then
+        log_error "Kernel headers/build directory not found: $kernel_build_dir"
+        echo ""
+        echo -e "${YELLOW}The kernel headers package for your running kernel was not installed.${NC}"
+        echo -e "${YELLOW}This usually happens on cloud kernels where version-specific headers${NC}"
+        echo -e "${YELLOW}packages (e.g. linux-headers-$(uname -r)) don't exist.${NC}"
+        echo ""
+        echo -e "${CYAN}Possible solutions:${NC}"
+
+        if [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
+            if [[ "$(uname -r)" == *-cloud-* ]]; then
+                echo "  1. Install cloud kernel headers:"
+                echo "     apt-get install -y linux-headers-cloud-amd64"
+                echo "  2. Or install the generic kernel and headers, then reboot:"
+                echo "     apt-get install -y linux-image-generic linux-headers-generic"
+                echo "     reboot"
+            else
+                echo "  1. Install kernel headers:"
+                echo "     apt-get install -y linux-headers-\$(uname -r)"
+                echo "  2. Or install generic headers:"
+                echo "     apt-get install -y linux-headers-generic"
+            fi
+        elif [[ "$OS" == "centos" ]]; then
+            echo "  1. Install kernel development packages:"
+            echo "     yum install -y kernel-devel-\$(uname -r) kernel-headers-\$(uname -r)"
+            echo "  2. Or install the latest kernel and reboot:"
+            echo "     yum update -y kernel kernel-devel kernel-headers"
+            echo "     reboot"
+        fi
+        echo ""
+        echo -e "${YELLOW}After installing the kernel headers, re-run this installer.${NC}"
+        exit 1
     fi
 
     log_success "Dependencies installed"
